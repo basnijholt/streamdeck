@@ -1,5 +1,6 @@
 """Pure mapping from config and state to what each key and strip segment shows."""
 
+from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
 
@@ -35,8 +36,14 @@ def _paint(view: KeyView, palette: tuple[str, str]) -> KeyView:
 
 
 def key_view(
-    spec: KeySpec | None, store: StateStore, cfg: Config, slot_threads: list[Thread]
+    spec: KeySpec | None,
+    store: StateStore,
+    cfg: Config,
+    slot_threads: list[Thread],
+    running_for: Callable[[Thread], float] | None = None,
 ) -> KeyView:
+    """What key `spec` shows. `running_for` gives the seconds a working thread has been working;
+    without it a working slot says only `working`."""
     if spec is None:
         return KeyView(None, None, None, bg=SHEET_BG, border=None)
     view = _paint(KeyView(spec.icon, spec.label, None), DEFAULT)
@@ -51,7 +58,7 @@ def key_view(
     if spec.state is not None:
         view = _ha_key(view, spec.state.ha, store)
     if spec.t3_slot is not None:
-        view = _slot_key(view, spec.t3_slot, store, slot_threads)
+        view = _slot_key(view, spec.t3_slot, store, slot_threads, running_for)
     return view
 
 
@@ -87,11 +94,20 @@ def _ha_key(view: KeyView, entity_id: str, store: StateStore) -> KeyView:
     return view
 
 
-def _slot_key(view: KeyView, slot: int, store: StateStore, threads: list[Thread]) -> KeyView:
+def _slot_key(
+    view: KeyView,
+    slot: int,
+    store: StateStore,
+    threads: list[Thread],
+    running_for: Callable[[Thread], float] | None,
+) -> KeyView:
     if slot >= len(threads):
         return replace(view, label=_NO_VALUE, sublabel=None, dim=True)
     thread = threads[slot]
-    palette, sublabel = _THREAD_LOOK[thread_state(thread)]
+    state = thread_state(thread)
+    palette, sublabel = _THREAD_LOOK[state]
+    if state == "working" and running_for is not None:
+        sublabel = f"working {int(running_for(thread) // 60)}m"
     return replace(
         _paint(view, palette),
         label=thread.title[:_LABEL_CHARS],

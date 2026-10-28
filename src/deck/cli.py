@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from deck.actions import ActionRunner
-from deck.config import Action, Config, ConfigError, HAConfig, load_config
+from deck.config import Action, Config, ConfigError, HAConfig, T3Config, load_config
 from deck.control import call, default_control_path
 from deck.daemon import Daemon
 from deck.ddc import Ddc
@@ -28,7 +28,10 @@ from deck.remote.server import serve_stdio
 from deck.render import compose_deck, draw_key, draw_segment
 from deck.runner import Runner
 from deck.state import StateStore
+from deck.t3 import controller as _t3_dials  # noqa: F401  (registers the effort and model dials)
+from deck.t3.controller import T3Controller
 from deck.t3.model import Thread, visible_threads
+from deck.t3.source import T3Client, T3Source
 from deck.views import key_view, segment_view
 
 log = logging.getLogger(__name__)
@@ -155,6 +158,48 @@ def _start_home_assistant(
     services.actions.register("ha", ha_action)
 
 
+def _start_t3(cfg: T3Config, services: Services, store: StateStore, stack: AsyncExitStack) -> None:
+    """Start a watch per T3 server and register the thread actions.
+
+    A server whose token is missing or whose URL is unusable stays offline, with its keys
+    dimmed: the daemon keeps running.
+    """
+    sources: dict[str, T3Source] = {}
+    clients: list[T3Client] = []
+    for server in cfg.servers:
+        store.set(f"t3.online.{server.name}", False)
+        token = os.environ.get(server.token_env, "").strip()
+        if not token:
+            log.error(
+                "t3 server %s is disabled: environment variable %s is not set",
+                server.name,
+                server.token_env,
+            )
+            continue
+        try:
+            client = T3Client(server, token)
+        except ValueError as exc:
+            log.error("t3 server %s is disabled: %s", server.name, exc)
+            continue
+        sources[server.name] = client
+        clients.append(client)
+    controller = services.t3 = T3Controller(store, sources, cfg, services.mac)
+    stack.push_async_callback(controller.aclose)
+    _start_background(stack, controller.tick_forever())
+    for client in clients:
+        _start_background(stack, client.watch(store))
+
+    async def t3_action(action: Action) -> None:
+        if action.type == "t3.focus":
+            await controller.focus(action.args)
+        elif action.type == "t3.new":
+            await controller.new_thread()
+        else:
+            raise ValueError(f"unknown t3 action {action.type!r}")
+
+    services.actions.register("t3.", t3_action)
+
+
 async def _services(config: Config, store: StateStore, stack: AsyncExitStack) -> Services:
     """Build the services. Later tasks start their clients here and register cleanup on `stack`."""
     services = Services(store, config, actions=ActionRunner())
@@ -173,6 +218,8 @@ async def _services(config: Config, store: StateStore, stack: AsyncExitStack) ->
         services.actions.register("mac.", mac_action)
     if config.home_assistant is not None:
         _start_home_assistant(config.home_assistant, services, store, stack)
+    if config.t3 is not None:
+        _start_t3(config.t3, services, store, stack)
     return services
 
 

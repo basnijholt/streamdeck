@@ -3,7 +3,9 @@ import contextlib
 import logging
 import time
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -30,6 +32,8 @@ from deck.events import (
 )
 from deck.render import KeyView, SegmentView, draw_key, draw_segment
 from deck.state import StateStore
+from deck.t3.model import Thread
+from deck.views import key_view
 
 VALID = """\
 mac:
@@ -306,6 +310,47 @@ async def test_slow_action_does_not_block_other_keys(make_daemon, clock):
     assert started == ["Ghostty", "Safari"]
     gate.set()
     await settle()
+
+
+# --- T3 slots -------------------------------------------------------------------
+
+T3_CONFIG = "t3:\n  servers: []\n  models: {}\n"
+WORKING_THREAD = Thread(
+    server="pc",
+    thread_id="t1",
+    project_id="p1",
+    title="Fix it",
+    status="running",
+    pending_requests=0,
+    model="m",
+    instance_id="i",
+    options=(),
+    settled=False,
+    archived=False,
+    parent_thread_id=None,
+    updated_at=datetime(2026, 10, 28, 12, 0, tzinfo=UTC),
+)
+
+
+async def test_render_hands_the_t3_services_elapsed_time_to_the_slot_keys(
+    make_daemon, config_path, deck
+):
+    config_path.write_text(T3_CONFIG + VALID.replace('{icon: "🔇", label: Idle}', "{t3.slot: 0}"))
+    daemon = await make_daemon()
+    daemon.store.set("t3.threads", [WORKING_THREAD])
+    spec = daemon.config.pages["home"].keys[4]
+
+    daemon.render()  # no T3 service: the plain label
+    plain = key_view(spec, daemon.store, daemon.config, [WORKING_THREAD])
+    assert plain.sublabel == "working"
+    assert deck.keys[4].tobytes() == image_bytes(plain)
+
+    daemon.services.t3 = SimpleNamespace(running_for=lambda thread: 185)
+    daemon._pushed.clear()
+    daemon.render()
+    timed = key_view(spec, daemon.store, daemon.config, [WORKING_THREAD], lambda thread: 185)
+    assert timed.sublabel == "working 3m"
+    assert deck.keys[4].tobytes() == image_bytes(timed)
 
 
 # --- pages ----------------------------------------------------------------------

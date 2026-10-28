@@ -367,9 +367,11 @@ class Daemon:
         self._flash = {index: end for index, end in self._flash.items() if end > now}
         page = self._page()
         slot_threads = visible_threads(self.store.get("t3.threads", []))
+        t3 = self.services.t3
+        running_for = t3.running_for if t3 is not None else None
         for index in range(self._device.key_count):
             spec = page.keys[index] if index < len(page.keys) else None
-            view = key_view(spec, self.store, self.config, slot_threads)
+            view = key_view(spec, self.store, self.config, slot_threads, running_for)
             if index in self._flash:
                 view = replace(view, bg=ERROR[0], border=ERROR[1])
             if self._config_error and index == 0:

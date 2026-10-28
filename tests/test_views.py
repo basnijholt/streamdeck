@@ -277,6 +277,45 @@ def test_slot_colored_by_thread_state(cfg, store, overrides, palette, sublabel):
     assert view.sublabel == sublabel and view.label == "Fix the thing"[:12] and not view.dim
 
 
+@pytest.mark.parametrize(
+    "seconds,sublabel",
+    [
+        (0, "working 0m"),
+        (59.9, "working 0m"),
+        (60, "working 1m"),
+        (185, "working 3m"),
+        (3725, "working 62m"),
+    ],
+)
+def test_working_slot_shows_elapsed_minutes(cfg, store, seconds, sublabel):
+    seen = []
+
+    def running_for(t: Thread) -> float:
+        seen.append(t)
+        return seconds
+
+    working = thread(status="running")
+    view = key_view(key(**SLOT), store, cfg, [working], running_for)
+    assert view.sublabel == sublabel and colors(view) == WORKING
+    assert seen == [working]
+
+
+@pytest.mark.parametrize(
+    "overrides,sublabel",
+    [
+        ({"status": "waiting"}, "needs you"),
+        ({"status": "completed"}, "done"),
+        ({"status": "failed"}, "error"),
+    ],
+)
+def test_elapsed_time_is_for_working_slots_only(cfg, store, overrides, sublabel):
+    def running_for(t: Thread) -> float:
+        raise AssertionError("asked for the elapsed time of a thread that is not working")
+
+    view = key_view(key(**SLOT), store, cfg, [thread(**overrides)], running_for)
+    assert view.sublabel == sublabel
+
+
 def test_slot_label_truncated_to_12_chars(cfg, store):
     view = key_view(key(**SLOT), store, cfg, [thread(title="Refactor the authentication layer")])
     assert view.label == "Refactor the"
