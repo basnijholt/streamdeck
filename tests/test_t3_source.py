@@ -285,6 +285,16 @@ async def test_list_threads_rejected_token_raises_auth_error(stub):
         await client.list_threads()
 
 
+async def test_list_threads_malformed_snapshot_raises(stub, client, monkeypatch):
+    async def malformed(ws, request):
+        values = [{"kind": "snapshot", "snapshot": "not an object"}]
+        await ws.send(json.dumps({"_tag": "Chunk", "requestId": request["id"], "values": values}))
+
+    monkeypatch.setattr(stub, "_answer", malformed)
+    with pytest.raises(T3Error, match="malformed"):
+        await client.list_threads()
+
+
 async def test_list_threads_server_down_raises(stub):
     await stub.stop()
     with pytest.raises(T3Error, match="pc"):
@@ -450,6 +460,25 @@ async def test_watch_reconnects_after_a_defect(stub, store):
         await eventually(lambda: stub.connections == 2 and store.get("t3.online.pc") is True)
 
 
+@pytest.mark.parametrize(
+    "exit_",
+    [
+        "not an object",
+        {"_tag": "Failure", "cause": "not a list"},
+        {"_tag": "Failure", "cause": ["not an object"]},
+        {"_tag": "Failure", "cause": [{"_tag": "Fail", "error": "plain words"}]},
+        {"_tag": "Failure"},
+    ],
+)
+async def test_set_model_selection_malformed_exit_raises_t3_error(stub, client, monkeypatch, exit_):
+    async def malformed(ws, request):
+        await ws.send(json.dumps({"_tag": "Exit", "requestId": request["id"], "exit": exit_}))
+
+    monkeypatch.setattr(stub, "_answer", malformed)
+    with pytest.raises(T3Error):
+        await client.set_model_selection(FIXTURE_ID, ModelSelection("claudeAgent", "m", ()))
+
+
 async def test_set_model_selection_fails_on_a_protocol_error(stub, client, monkeypatch):
     async def protocol_error(ws, request):
         await ws.send(json.dumps({"_tag": "ClientProtocolError", "error": {"_tag": "x"}}))
@@ -516,6 +545,28 @@ async def test_watch_gives_up_on_a_silent_server(stub, store, monkeypatch):
         assert store.get("t3.online.pc") is False
 
 
+async def test_watch_drops_a_server_that_goes_silent_after_the_snapshot(stub, store, monkeypatch):
+    monkeypatch.setattr(source_module, "LIVENESS_TIMEOUT", 0.3)
+    delays: list[float] = []
+    release = asyncio.Event()
+
+    async def sleep(delay: float) -> None:
+        delays.append(delay)
+        await release.wait()
+
+    client = T3Client(server_config(stub.url), TOKEN, sleep=sleep)
+    async with watching(client, store, interval=0.05):
+        await eventually(lambda: store.get("t3.online.pc") is True)
+        before = store.get("t3.threads.pc")
+        stub.silent = True  # no more Pongs, no more events
+        await eventually(lambda: delays == [1.0])
+        assert store.get("t3.online.pc") is False
+        assert store.get("t3.threads.pc") == before
+        stub.silent = False
+        release.set()
+        await eventually(lambda: stub.connections == 2 and store.get("t3.online.pc") is True)
+
+
 async def test_watch_stays_online_while_pongs_arrive(stub, store, monkeypatch):
     monkeypatch.setattr(source_module, "LIVENESS_TIMEOUT", 0.3)
     sleep = FakeSleep()
@@ -559,6 +610,12 @@ def test_thread_id_from_url_roundtrip():
         f"{WEB_URL}/?thread={FIXTURE_ID}",  # query only
         f"{WEB_URL}?{ENV_ID}/{FIXTURE_ID}",
         f"{WEB_URL}/#/{ENV_ID}/{FIXTURE_ID}",
+        f"https://t3.lab.nijho.lt@evil.com/{ENV_ID}/{FIXTURE_ID}",  # userinfo trick
+        f"http://t3.lab.nijho.lt/{ENV_ID}/{FIXTURE_ID}",  # other scheme
+        f"//t3.lab.nijho.lt/{ENV_ID}/{FIXTURE_ID}",  # scheme-relative
+        f"{WEB_URL}/{ENV_ID}/{FIXTURE_ID}%2Fdiff",  # an escaped slash
+        f"{WEB_URL}/{ENV_ID}/{FIXTURE_ID};x=1",
+        f"{WEB_URL}/{ENV_ID}/thread:provider:x",
         "about:blank",
         "",
     ]:

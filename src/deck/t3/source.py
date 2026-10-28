@@ -15,8 +15,9 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
@@ -48,6 +49,7 @@ PING = json.dumps({"_tag": "Ping"})
 # Acknowledges a stream chunk: the server sends the next one only after this.
 ACK = json.dumps({"_tag": "Ack", "requestId": REQUEST_ID})
 _ACTIVE_RUN = {"preparing", "starting", "running"}
+_THREAD_ID = re.compile(r"[A-Za-z0-9-]+")  # top-level thread ids are UUIDs
 
 
 class T3Error(Exception):
@@ -155,18 +157,26 @@ def _messages(raw: str | bytes) -> list[dict[str, Any]]:
     return [m for m in messages if isinstance(m, dict)]
 
 
+def _dict(value: Any) -> dict[str, Any]:
+    """`value` if it is a JSON object, else an empty one: for fields a server might send odd."""
+    return value if isinstance(value, dict) else {}
+
+
 def _exit_value(message: dict[str, Any]) -> Any:
     """The result of an RPC `Exit` message; a failure raises `T3Error` with the server's words."""
-    exit_ = message.get("exit") or {}
+    exit_ = _dict(message.get("exit"))
     if exit_.get("_tag") == "Success":
         return exit_.get("value")
-    for cause in exit_.get("cause") or []:
+    causes = exit_.get("cause")
+    for cause in map(_dict, causes if isinstance(causes, list) else []):
         if cause.get("_tag") == "Fail":
-            error = cause.get("error") or {}
-            raise T3Error(str(error.get("message") or error.get("_tag") or error))
+            error = cause.get("error")
+            if isinstance(error, dict):
+                error = error.get("message") or error.get("_tag") or error
+            raise T3Error(str(error))
         if cause.get("_tag") == "Die":
             raise T3Error(f"the server failed: {cause.get('defect')}")
-    raise T3Error(f"the request failed: {exit_}")
+    raise T3Error(f"the request failed: {str(message.get('exit'))[:200]}")
 
 
 def _raise_if_fatal(message: dict[str, Any]) -> None:
@@ -211,7 +221,7 @@ class T3Client(T3Source):
         self._sleep = sleep
         self._web_url = server.web_url.rstrip("/")
         web = urlsplit(self._web_url)
-        self._web_host = (web.hostname, web.port)
+        self._web_origin = (web.scheme, web.hostname, web.port)
         self._web_path = web.path
         self._delay = BACKOFF_START
 
@@ -223,7 +233,7 @@ class T3Client(T3Source):
 
     async def list_threads(self) -> list[Thread]:
         """Every thread of the server that can get a key (see `SHELL_OPTIONS`)."""
-        try:
+        with self._as_t3_errors():
             async with asyncio.timeout(SNAPSHOT_TIMEOUT), self._connect() as ws:
                 await ws.send(_request("orchestration.subscribeShell", SHELL_OPTIONS))
                 while True:
@@ -231,10 +241,6 @@ class T3Client(T3Source):
                         snapshot = self._snapshot_in(message)
                         if snapshot is not None:
                             return list(snapshot.values())
-        except TimeoutError:
-            raise T3Error(f"t3 server {self.name} timed out") from None
-        except (OSError, WebSocketException) as exc:
-            raise T3Error(f"t3 server {self.name} unreachable: {exc}") from None
 
     async def get_model_selection(self, thread_id: str) -> ModelSelection:
         family = await self._call("orchestration.getThreadFamily", {"threadId": thread_id})
@@ -256,7 +262,7 @@ class T3Client(T3Source):
 
     async def _call(self, tag: str, payload: dict[str, Any]) -> Any:
         """Send one request on a connection of its own and return its result."""
-        try:
+        with self._as_t3_errors():
             async with asyncio.timeout(REQUEST_TIMEOUT), self._connect() as ws:
                 await ws.send(_request(tag, payload))
                 while True:
@@ -264,6 +270,12 @@ class T3Client(T3Source):
                         _raise_if_fatal(message)
                         if message.get("_tag") == "Exit" and message.get("requestId") == REQUEST_ID:
                             return _exit_value(message)
+
+    @contextlib.contextmanager
+    def _as_t3_errors(self) -> Iterator[None]:
+        """Turn a timeout or a network failure into `T3Error`, the one error callers catch."""
+        try:
+            yield
         except TimeoutError:
             raise T3Error(f"t3 server {self.name} timed out") from None
         except (OSError, WebSocketException) as exc:
@@ -377,8 +389,11 @@ class T3Client(T3Source):
         snapshot = None
         for item in message.get("values") or []:
             if isinstance(item, dict) and _is_authoritative_snapshot(item):
+                body = item.get("snapshot")
+                if not isinstance(body, dict):
+                    raise T3Error(f"malformed thread snapshot: {str(body)[:200]}")
                 snapshot = {}
-                for raw in (item.get("snapshot") or {}).get("threads") or []:
+                for raw in body.get("threads") or []:
                     self._put(snapshot, raw)
             elif snapshot is not None and isinstance(item, dict):
                 self._apply(snapshot, [item])
@@ -394,7 +409,7 @@ class T3Client(T3Source):
             if kind == "thread.updated" and item.get("location") == "active":
                 changed |= self._put(threads, item.get("thread"))
             elif kind in {"thread.updated", "thread.removed"}:  # removed, or moved to the archive
-                thread_id = item.get("threadId") or (item.get("thread") or {}).get("id")
+                thread_id = item.get("threadId") or _dict(item.get("thread")).get("id")
                 changed |= threads.pop(thread_id, None) is not None
         return changed
 
@@ -417,18 +432,19 @@ class T3Client(T3Source):
     def thread_id_from_url(self, url: str) -> str | None:
         """The thread a `thread_url` of this server points at; None for any other URL.
 
-        The host must be `web_url`'s and the path exactly `/<environment_id>/<threadId>`;
-        a query or fragment is ignored.
+        Scheme, host and port must be `web_url`'s, with no user info, and the path exactly
+        `/<environment_id>/<threadId>` where the id is letters, digits and dashes. A query or
+        fragment is ignored.
         """
         try:
             parts = urlsplit(url)
-            host = (parts.hostname, parts.port)
+            origin = (parts.scheme, parts.hostname, parts.port)
         except ValueError:
             return None
-        if parts.hostname is None or host != self._web_host:
+        if parts.hostname is None or "@" in parts.netloc or origin != self._web_origin:
             return None
         prefix = f"{self._web_path}/{self._server.environment_id}/"
-        if not parts.path.startswith(prefix):
-            return None
         thread_id = parts.path.removeprefix(prefix)
-        return thread_id if thread_id and "/" not in thread_id else None
+        if not parts.path.startswith(prefix) or not _THREAD_ID.fullmatch(thread_id):
+            return None
+        return thread_id

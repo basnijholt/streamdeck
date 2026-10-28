@@ -235,7 +235,8 @@ real thread's model or effort was changed, and no thread or message was created.
 ## Fixtures (`tests/fixtures/t3/`)
 
 The fixtures are real frames from the live server. Thread titles became `Thread N` and
-project titles `Project N`. Workspace paths and worktree paths were replaced. Goals, error
+project titles `Project N`. Branch names other than `main` became `t3/branch-N`, because T3
+derives them from thread titles. Workspace paths and worktree paths were replaced. Goals, error
 texts, pull-request titles and links, repository identities and project scripts were
 removed. No token appears in them. Thread and project ids are real.
 `set_model_selection.json` is the recorded no-op request with `effort` set to `high` (what
