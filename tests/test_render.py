@@ -52,6 +52,16 @@ def test_segment_and_compose_sizes():
     assert sheet.width >= 1200
 
 
+def test_wrap_breaks_at_spaces_and_ellipsizes_the_rest():
+    draw = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    font = render._text_font(15)
+    lines = render.wrap(draw, "Refactor the authentication layer of the app", font, 88, 3)
+    assert len(lines) == 3
+    assert lines[0].startswith("Refactor") and lines[-1].endswith("…")
+    assert all(draw.textlength(line, font=font) <= 88 for line in lines)
+    assert render.wrap(draw, "Short", font, 88, 3) == ["Short"]
+
+
 def test_find_font_env_override(monkeypatch, tmp_path, fresh_fonts):
     font = tmp_path / "custom.ttf"
     font.touch()

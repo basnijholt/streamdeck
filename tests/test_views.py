@@ -274,7 +274,7 @@ SLOT = {"t3.slot": 0}
 def test_slot_colored_by_thread_state(cfg, store, overrides, palette, sublabel):
     view = key_view(key(**SLOT), store, cfg, [thread(**overrides)])
     assert colors(view) == palette
-    assert view.sublabel == sublabel and view.label == "Fix the thing"[:12] and not view.dim
+    assert view.sublabel == sublabel and view.label == "Fix the thing" and not view.dim
 
 
 @pytest.mark.parametrize(
@@ -316,9 +316,9 @@ def test_elapsed_time_is_for_working_slots_only(cfg, store, overrides, sublabel)
     assert view.sublabel == sublabel
 
 
-def test_slot_label_truncated_to_12_chars(cfg, store):
+def test_slot_label_is_the_whole_title(cfg, store):
     view = key_view(key(**SLOT), store, cfg, [thread(title="Refactor the authentication layer")])
-    assert view.label == "Refactor the"
+    assert view.label == "Refactor the authentication layer"  # draw_key wraps it
 
 
 def test_slot_picks_thread_by_index(cfg, store):

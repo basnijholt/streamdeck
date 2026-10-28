@@ -24,7 +24,6 @@ _THREAD_LOOK = {
     "done": (DONE, "done"),
     "error": (ERROR, "error"),
 }
-_LABEL_CHARS = 12
 _NO_VALUE = "—"
 
 
@@ -110,7 +109,7 @@ def _slot_key(
         sublabel = f"working {int(running_for(thread) // 60)}m"
     return replace(
         _paint(view, palette),
-        label=thread.title[:_LABEL_CHARS],
+        label=thread.title,
         sublabel=sublabel,
         dim=not store.get(f"t3.online.{thread.server}"),
     )

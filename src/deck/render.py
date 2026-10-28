@@ -24,6 +24,7 @@ BORDER_RADIUS = 14
 DIM_FACTOR = 0.4
 
 ICON_SIZE = 44
+KEY_INSET = 12  # the key's bezel hides its outer pixels: text stays this far inside
 # Bitmap emoji fonts only load at fixed strike sizes: Noto Color Emoji at 109,
 # Apple Color Emoji at 160.
 EMOJI_STRIKES = (109, 160)
@@ -145,6 +146,33 @@ def _ellipsize(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, 
     return text + "…"
 
 
+def _fitting_font(
+    draw: ImageDraw.ImageDraw, text: str, sizes: tuple[int, ...], width: int
+) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    """The text font at the largest of `sizes` that fits `text` in `width`, else the smallest."""
+    for size in sizes:
+        font = _text_font(size)
+        if draw.textlength(text, font=font) <= width:
+            return font
+    return font
+
+
+def wrap(
+    draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, width: int, max_lines: int
+) -> list[str]:
+    """`text` broken at spaces into at most `max_lines` lines of `width`; the rest is ellipsized."""
+    words = text.split()
+    lines: list[str] = []
+    while words and len(lines) < max_lines:
+        line = words.pop(0)
+        while words and draw.textlength(f"{line} {words[0]}", font=font) <= width:
+            line = f"{line} {words.pop(0)}"
+        lines.append(line)
+    if words:
+        lines[-1] = " ".join([lines[-1], *words])
+    return [_ellipsize(draw, line, font, width) for line in lines]
+
+
 def _icon_image(icon: str, size: int) -> Image.Image:
     """Render an icon as an RGBA image fitting `size`x`size`; emoji font if available."""
     emoji = _emoji_font()
@@ -199,18 +227,29 @@ def draw_key(view: KeyView) -> Image.Image:
             width=BORDER_WIDTH,
         )
 
-    max_text = KEY_SIZE - 2 * (BORDER_WIDTH + 4)
+    # Text stays clear of the bottom edge too: the key's lens mirrors what is drawn near it.
+    max_text = KEY_SIZE - 2 * KEY_INSET
+    label = _plain(view.label) if view.label else ""
     if view.icon:
-        _paste_centered(img, _icon_image(view.icon, ICON_SIZE), (KEY_SIZE // 2, 36))
-    if view.label:
-        font = _text_font(16)
-        text = _ellipsize(draw, _plain(view.label), font, max_text)
-        y = 80 if view.sublabel else 86
-        draw.text((KEY_SIZE // 2, y), text, font=font, fill=_rgb(TEXT_COLOR), anchor="mm")
+        _paste_centered(img, _icon_image(view.icon, ICON_SIZE), (KEY_SIZE // 2, 34))
+        if label:
+            font = _fitting_font(draw, label, (16, 14, 12), max_text)
+            text = _ellipsize(draw, label, font, max_text)
+            y = 74 if view.sublabel else 80
+            draw.text((KEY_SIZE // 2, y), text, font=font, fill=_rgb(TEXT_COLOR), anchor="mm")
+    elif label:  # no icon (a thread slot): the label gets the room, on up to three lines
+        font = _text_font(15)
+        lines = wrap(draw, label, font, max_text, 3)
+        line_height = 18
+        bottom = 80 if view.sublabel else KEY_SIZE - KEY_INSET
+        top = KEY_INSET + (bottom - KEY_INSET - line_height * len(lines)) // 2
+        for i, line in enumerate(lines):
+            y = top + line_height * i + line_height // 2
+            draw.text((KEY_SIZE // 2, y), line, font=font, fill=_rgb(TEXT_COLOR), anchor="mm")
     if view.sublabel:
         font = _text_font(12)
         text = _ellipsize(draw, _plain(view.sublabel), font, max_text)
-        draw.text((KEY_SIZE // 2, 98), text, font=font, fill=_rgb(MUTED_COLOR), anchor="mm")
+        draw.text((KEY_SIZE // 2, 90), text, font=font, fill=_rgb(MUTED_COLOR), anchor="mm")
     if view.badge:
         _draw_badge(img, draw, view.badge)
 
