@@ -40,11 +40,11 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "pillow" },
+    { name = "pillow", specifier = ">=10.1" },
     { name = "pydantic", specifier = ">=2" },
     { name = "pyyaml" },
     { name = "streamdeck", specifier = ">=0.10.0" },
-    { name = "websockets" },
+    { name = "websockets", specifier = ">=15" },
 ]
 
 [package.metadata.requires-dev]

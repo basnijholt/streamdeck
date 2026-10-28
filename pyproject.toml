@@ -6,10 +6,10 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "streamdeck>=0.10.0",
-    "pillow",
+    "pillow>=10.1",
     "pydantic>=2",
     "pyyaml",
-    "websockets",
+    "websockets>=15",
 ]
 
 [project.scripts]
