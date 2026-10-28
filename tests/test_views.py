@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from deck.cli import main
+from deck.cli import _load_state, main
 from deck.config import Config, KeySpec, load_config
 from deck.render import KeyView, SegmentView
 from deck.state import StateStore
@@ -485,6 +485,16 @@ def test_cli_render_state_colors_slot(tmp_path):
     with Image.open(out) as sheet:
         x, y = key_origin(sheet, 3)  # example page: key 3 is {t3.slot: 0}
         assert sheet.convert("RGB").getpixel((x + 8, y + 20)) == (0x0F, 0x2A, 0x1A)
+
+
+def test_cli_render_state_pending_dial(tmp_path):
+    pending = {"title": "Fix login", "current": "xhigh", "pending": "high"}
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({"t3.pending.effort": pending}))
+    assert _load_state(state).get("t3.pending.effort") == Pending(**pending)
+    state.write_text(json.dumps({"t3.pending.effort": {"title": "Fix login"}}))
+    with pytest.raises(ValueError, match="t3.pending.effort"):
+        _load_state(state)
 
 
 @pytest.mark.parametrize(

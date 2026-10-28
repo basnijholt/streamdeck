@@ -1,0 +1,23 @@
+{
+  "mac.online": true,
+  "mac.audio.output": "iLoud Micro Monitor",
+  "mac.audio.input": "Q9",
+  "mac.audio.inputs": ["Q9", "MacBook Pro Microphone"],
+  "mac.mic.muted": false,
+  "mac.volume": 42,
+  "ddc.brightness": 80,
+  "ha.online": true,
+  "ha.light.guest_room": {"state": "on", "attributes": {"brightness": 153}},
+  "ha.light.office": {"state": "off", "attributes": {}},
+  "t3.online.pc": true,
+  "t3.threads": [
+    {"title": "Fix login flow", "status": "running", "updated_at": "2026-10-28T12:06:00+00:00"},
+    {"title": "Review PR #412", "status": "waiting", "updated_at": "2026-10-28T12:05:00+00:00"},
+    {"title": "Dark mode", "status": "running", "updated_at": "2026-10-28T12:04:00+00:00"},
+    {"title": "Release notes", "status": "completed", "updated_at": "2026-10-28T12:03:00+00:00"},
+    {"title": "Flaky test", "status": "failed", "updated_at": "2026-10-28T12:02:00+00:00"},
+    {"title": "Docs refresh", "status": "idle", "updated_at": "2026-10-28T12:01:00+00:00"}
+  ],
+  "t3.pending.effort": {"title": "Fix login flow", "current": "xhigh", "pending": "high"},
+  "t3.pending.model": {"title": "Fix login flow", "current": "claude-opus-5-5", "pending": "claude-sonnet-5-5"}
+}

@@ -76,6 +76,15 @@ def test_cli_render_writes_png(tmp_path):
         assert sheet.width >= 1200
 
 
+def test_cli_render_full_example(tmp_path):
+    """The README's preview command keeps working: `examples/full.yaml` with its state file."""
+    examples = EXAMPLE.parent
+    out = tmp_path / "deck.png"
+    argv = ["render", str(examples / "full.yaml"), "--png", str(out)]
+    assert main([*argv, "--state", str(examples / "state.json")]) == 0
+    assert main([*argv, "--page", "more"]) == 0
+
+
 def test_cli_render_unknown_page(tmp_path, capsys):
     out = tmp_path / "deck.png"
     assert main(["render", str(EXAMPLE), "--png", str(out), "--page", "nope"]) == 1

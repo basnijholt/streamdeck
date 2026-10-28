@@ -30,7 +30,7 @@ from deck.runner import Runner
 from deck.state import StateStore
 from deck.t3 import controller as _t3_dials  # noqa: F401  (registers the effort and model dials)
 from deck.t3.controller import T3Controller
-from deck.t3.model import Thread, visible_threads
+from deck.t3.model import Pending, Thread, visible_threads
 from deck.t3.source import T3Client, T3Source
 from deck.views import key_view, segment_view
 
@@ -78,7 +78,8 @@ def _thread_from_json(raw: dict[str, Any]) -> Thread:
 
 
 def _load_state(path: Path) -> StateStore:
-    """Read a JSON object of state keys into a store (`t3.threads` holds thread objects)."""
+    """Read a JSON object of state keys into a store (`t3.threads` holds thread objects, and
+    an object under `t3.pending.effort` or `t3.pending.model` is a pending dial change)."""
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError("expected a JSON object of state keys")
@@ -86,6 +87,12 @@ def _load_state(path: Path) -> StateStore:
         data["t3.threads"] = [_thread_from_json(t) for t in data.get("t3.threads", [])]
     except (TypeError, ValueError) as exc:
         raise ValueError(f"t3.threads: {exc}") from exc
+    for key in ("t3.pending.effort", "t3.pending.model"):
+        if isinstance(data.get(key), dict):
+            try:
+                data[key] = Pending(**data[key])
+            except TypeError as exc:
+                raise ValueError(f"{key}: {exc}") from exc
     store = StateStore()
     store.update("", data)
     return store
