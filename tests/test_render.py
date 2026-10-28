@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -80,3 +81,50 @@ def test_cli_render_unknown_page(tmp_path, capsys):
     assert main(["render", str(EXAMPLE), "--png", str(out), "--page", "nope"]) == 1
     assert "unknown page 'nope'" in capsys.readouterr().out
     assert not out.exists()
+
+
+def _stub_fc_match(monkeypatch, families, path):
+    """Fake fc-match answering any query with this family/file, honoring the -f format."""
+
+    def run(cmd, **kwargs):
+        assert cmd[:2] == ["fc-match", "-f"]
+        out = cmd[2].replace("%{family}", families).replace("%{file}", str(path))
+        out = out.replace("\\t", "\t")
+        return subprocess.CompletedProcess(cmd, 0, stdout=out, stderr="")
+
+    monkeypatch.setattr(render.subprocess, "run", run)
+
+
+def test_find_font_rejects_fontconfig_substitute(monkeypatch, tmp_path, fresh_fonts):
+    # fc-match exits 0 with its best substitute for an unknown family.
+    substitute = tmp_path / "Substitute.ttf"
+    substitute.touch()
+    monkeypatch.delenv("DECK_FONT_TEXT", raising=False)
+    monkeypatch.delenv("DECK_FONT_EMOJI", raising=False)
+    monkeypatch.setattr(render, "_MACOS_EMOJI", str(tmp_path / "missing.ttc"))
+    _stub_fc_match(monkeypatch, "DejaVu Math TeX Gyre", substitute)
+
+    assert find_font("emoji") is None
+    assert find_font("text") is None
+    assert render._emoji_font() is None
+    img = draw_key(KeyView(icon="👻", label=None, sublabel=None))
+    assert len(img.crop((30, 10, 82, 60)).getcolors(52 * 50)) > 1  # drawn via the text path
+
+
+def test_find_font_next_candidate_after_rejected_substitute(monkeypatch, tmp_path, fresh_fonts):
+    substitute = tmp_path / "Substitute.ttf"
+    substitute.touch()
+    apple = tmp_path / "Apple Color Emoji.ttc"
+    apple.touch()
+    monkeypatch.delenv("DECK_FONT_EMOJI", raising=False)
+    monkeypatch.setattr(render, "_MACOS_EMOJI", str(apple))
+    _stub_fc_match(monkeypatch, "DejaVu Math TeX Gyre", substitute)
+    assert find_font("emoji") == str(apple)
+
+
+def test_find_font_accepts_family_in_comma_list(monkeypatch, tmp_path, fresh_fonts):
+    font = tmp_path / "DejaVuSans.ttf"
+    font.touch()
+    monkeypatch.delenv("DECK_FONT_TEXT", raising=False)
+    _stub_fc_match(monkeypatch, "DejaVu Sans,DejaVu Sans Condensed", font)
+    assert find_font("text") == str(font)

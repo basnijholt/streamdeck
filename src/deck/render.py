@@ -63,9 +63,14 @@ class SegmentView:
 
 @cache
 def _fc_match(family: str) -> str | None:
+    """Font file for exactly `family`, or None.
+
+    fc-match always exits 0 with its best substitute for an unknown family, so the
+    returned family names are checked against the requested one.
+    """
     try:
         result = subprocess.run(
-            ["fc-match", "-f", "%{file}", family],
+            ["fc-match", "-f", "%{family}\\t%{file}", family],
             capture_output=True,
             text=True,
             timeout=5,
@@ -73,8 +78,12 @@ def _fc_match(family: str) -> str | None:
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    path = result.stdout.strip()
-    return path if result.returncode == 0 and path and Path(path).is_file() else None
+    if result.returncode != 0:
+        return None
+    families, _, path = result.stdout.strip().partition("\t")
+    if family.casefold() not in {name.strip().casefold() for name in families.split(",")}:
+        return None
+    return path if path and Path(path).is_file() else None
 
 
 def find_font(kind: Literal["text", "emoji"]) -> str | None:
