@@ -5,9 +5,10 @@ the render loop does the drawing, at most `1 / RENDER_INTERVAL` times a second.
 """
 
 import asyncio
+import contextlib
 import logging
 import time
-from collections.abc import Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -44,12 +45,24 @@ WATCH_STABLE = 0.3
 
 CONFIG_ERROR_VIEW = KeyView("❌", "config", None, bg=ERROR[0], border=ERROR[1])
 
+# Sections describing connections that services open once; a reload cannot change them.
+CONNECTION_SECTIONS = ("mac", "home_assistant", "t3", "ddc")
+
 Slot = tuple[str, int]  # ("key" | "segment", index)
-ServicesFactory = Callable[[Config, StateStore], Services]
+# Awaited once, on the event loop, when the daemon starts. It starts the long-lived
+# clients and registers their cleanup on the exit stack, which `run` closes on the way out.
+ServicesFactory = Callable[[Config, StateStore, contextlib.AsyncExitStack], Awaitable[Services]]
 
 
 class Daemon:
-    """Raises `ConfigError` if the config is invalid at startup; later reloads keep the old one."""
+    """Drives one deck from one config file.
+
+    `ConfigError` is raised by the constructor if the config is invalid at startup; later
+    reloads keep the old config. Services are built once by `start` (which `run` calls) and
+    follow reloads only through `services.config`: connections need a restart.
+    """
+
+    services: Services  # set by start()
 
     def __init__(
         self,
@@ -66,23 +79,34 @@ class Daemon:
         self.store.subscribe(self._on_store_change)
         self._dirty = asyncio.Event()
         self._tasks: set[asyncio.Task[None]] = set()
-        # Pressed keys: index -> (press time, the key's spec when it went down).
-        self._down: dict[int, tuple[float, KeySpec]] = {}
+        # Pressed keys: index -> (press time, the key's spec and page when it went down).
+        self._down: dict[int, tuple[float, KeySpec, str]] = {}
         self._flash: dict[int, float] = {}  # key index -> when its error flash ends
         self._pushed: dict[Slot, tuple[Any, bytes]] = {}  # last view and image bytes pushed
         self._config_error = False
         self._signature = self._config_signature()
-        config = load_config(self._path)
-        self.current_page = config.start_page
-        self._install(config)
+        self.config = load_config(self._path)
+        self.current_page = self.config.start_page
+        self._built_with = self.config
+        self._dials: dict[int, DialHandler] = {}
 
     # --- config ---------------------------------------------------------------
+
+    async def start(self, stack: contextlib.AsyncExitStack) -> None:
+        """Build the services, once. `run` calls this; tests driving `handle` call it too.
+
+        A factory error propagates: it is a startup failure, not a config problem.
+        """
+        self.services = await self._services_factory(self.config, self.store, stack)
+        self.services.actions.register("page", self._page_action)
+        self._built_with = self.config
+        self._dials = self._build_dials(self._page(), self.services)
 
     def reload(self) -> bool:
         """Load the config file again. On failure keep the old config and mark key 0 with ❌."""
         self._signature = self._config_signature()
         try:
-            self._install(load_config(self._path))
+            config = load_config(self._path)
         except ConfigError as exc:
             log.error(
                 "invalid config %s, keeping the previous one:\n%s",
@@ -90,8 +114,9 @@ class Daemon:
                 "\n".join(exc.errors),
             )
         except Exception:
-            log.exception("cannot apply config %s, keeping the previous one", self._path)
+            log.exception("cannot read config %s, keeping the previous one", self._path)
         else:
+            self._apply(config)
             self._config_error = False
             self._dirty.set()
             log.info("loaded config %s", self._path)
@@ -100,12 +125,19 @@ class Daemon:
         self._dirty.set()
         return False
 
-    def _install(self, config: Config) -> None:
-        services = self._services_factory(config, self.store)
-        services.actions.register("page", self._page_action)
-        page = self.current_page if self.current_page in config.pages else config.start_page
-        dials = self._build_dials(config.pages[page], services)
-        self.config, self.services, self.current_page, self._dials = config, services, page, dials
+    def _apply(self, config: Config) -> None:
+        self.config = self.services.config = config
+        if self.current_page not in config.pages:
+            self.current_page = config.start_page
+            self._flash.clear()
+        self._dials = self._build_dials(self._page(), self.services)
+        stale = [
+            name
+            for name in CONNECTION_SECTIONS
+            if getattr(config, name) != getattr(self._built_with, name)
+        ]
+        if stale:
+            log.warning("restart deck to apply changes to: %s", ", ".join(stale))
 
     def _config_signature(self) -> tuple[int, int] | None:
         try:
@@ -157,22 +189,27 @@ class Daemon:
     # --- events -----------------------------------------------------------------
 
     async def run(self) -> None:
-        """Handle device events until the device's event stream ends or this task is cancelled."""
-        background = [
-            asyncio.create_task(self._render_loop()),
-            asyncio.create_task(self._watch_config()),
-        ]
-        try:
-            async for event in self._device.events():
-                try:
-                    await self.handle(event)
-                except Exception:
-                    log.exception("error handling %r", event)
-        finally:
-            tasks = [*background, *self._tasks]
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+        """Handle device events until the device's event stream ends or this task is cancelled.
+
+        The services' exit stack is closed last, after every task of the daemon has stopped.
+        """
+        async with contextlib.AsyncExitStack() as stack:
+            await self.start(stack)
+            background = [
+                asyncio.create_task(self._render_loop()),
+                asyncio.create_task(self._watch_config()),
+            ]
+            try:
+                async for event in self._device.events():
+                    try:
+                        await self.handle(event)
+                    except Exception:
+                        log.exception("error handling %r", event)
+            finally:
+                tasks = [*background, *self._tasks]
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
 
     async def handle(self, event: Event) -> None:
         match event:
@@ -204,28 +241,29 @@ class Daemon:
         spec = keys[index] if 0 <= index < len(keys) else None
         if spec is None or (self._config_error and index == 0):
             return  # nothing to run, or the key is showing the config error
-        self._down[index] = (self._clock(), spec)
+        self._down[index] = (self._clock(), spec, self.current_page)
 
     def _key_up(self, index: int) -> None:
         pressed = self._down.pop(index, None)
         if pressed is None:
             return
-        since, spec = pressed
+        since, spec, page = pressed
         held_long = self._clock() - since >= LONG_PRESS_SECONDS
         action = (spec.long_press if held_long else None) or spec.press
         if action is not None:
-            self._spawn(self._run_action(index, action))
+            self._spawn(self._run_action(index, page, action))
 
-    async def _run_action(self, index: int, action: Action) -> None:
+    async def _run_action(self, index: int, page: str, action: Action) -> None:
         try:
             await self.services.actions.run(action)
         except Exception:
-            log.exception("action %s failed", action.type)
-            self._flash[index] = self._clock() + FLASH_SECONDS
-            self._dirty.set()
+            log.exception("action %r failed", action)
+            if self.current_page == page:  # else the key is no longer on screen
+                self._flash[index] = self._clock() + FLASH_SECONDS
+                self._dirty.set()
 
     async def _dial_turn(self, index: int, ticks: int) -> None:
-        # Awaited in event order, so ticks are never reordered; handlers coalesce slow work.
+        # Awaited in event order, so ticks are never reordered (see `DialHandler`).
         handler = self._dials.get(index)
         if handler is None:
             return

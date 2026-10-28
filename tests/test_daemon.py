@@ -139,26 +139,41 @@ def clock() -> FakeClock:
 
 
 @pytest.fixture
-def make_daemon(config_path, deck, calls):
-    def build(clock=time.monotonic, handler=None) -> Daemon:
-        async def record(action: Action) -> None:
-            calls.append(action)
+async def make_daemon(config_path, deck, calls):
+    """Build daemons whose "mac." actions are recorded in `calls` (or sent to `handler`).
 
-        def services_factory(config, store: StateStore) -> Services:
-            actions = ActionRunner()
-            actions.register("mac.", handler or record)
-            return Services(store, config, actions)
+    By default the daemon is started, so `handle` and `render` work. Tests that call `run`
+    pass `started=False`: `run` starts the services itself.
+    """
+    async with contextlib.AsyncExitStack() as stack:
 
-        daemon = Daemon(config_path, deck, services_factory, clock=clock)
-        daemon.store.update("", {"mac.online": True, "ha.online": True})
-        return daemon
+        async def build(clock=time.monotonic, handler=None, started=True) -> Daemon:
+            async def record(action: Action) -> None:
+                calls.append(action)
 
-    return build
+            async def services_factory(config, store: StateStore, stack) -> Services:
+                actions = ActionRunner()
+                actions.register("mac.", handler or record)
+                return Services(store, config, actions)
+
+            daemon = Daemon(config_path, deck, services_factory, clock=clock)
+            daemon.store.update("", {"mac.online": True, "ha.online": True})
+            if started:
+                await daemon.start(stack)
+            return daemon
+
+        yield build
 
 
 @pytest.fixture
-def daemon(make_daemon, clock) -> Daemon:
-    return make_daemon(clock)
+async def daemon(make_daemon, clock) -> Daemon:
+    return await make_daemon(clock)
+
+
+@pytest.fixture
+async def unstarted(make_daemon, clock) -> Daemon:
+    """For tests that call `run()`, which starts the services."""
+    return await make_daemon(clock, started=False)
 
 
 @pytest.fixture
@@ -208,9 +223,9 @@ async def test_action_runner_exact_name_and_unregistered_type():
 # --- key presses ----------------------------------------------------------------
 
 
-async def test_press_runs_action(daemon, deck, calls):
+async def test_press_runs_action(unstarted, deck, calls):
     await deck.inject(KeyDown(0), KeyUp(0))
-    task = asyncio.create_task(daemon.run())
+    task = asyncio.create_task(unstarted.run())
     await wait_until(lambda: calls)
     task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
@@ -248,11 +263,16 @@ async def test_long_hold_without_long_press_runs_press(daemon, calls, clock):
     assert calls == [Action(type="mac.app", args="Safari")]
 
 
-async def test_long_press_fires_on_release_not_while_held(daemon, calls, clock):
-    await daemon.handle(KeyDown(0))
-    clock.advance(5.0)
-    await settle()
-    assert calls == []
+async def test_long_press_fires_on_release_not_while_held(make_daemon, deck, calls, monkeypatch):
+    monkeypatch.setattr(daemon_module, "LONG_PRESS_SECONDS", 0.05)
+    daemon = await make_daemon(started=False)  # real clock
+    async with running(daemon, deck):
+        await deck.inject(KeyDown(0))
+        await asyncio.sleep(0.2)  # well past the long-press time
+        assert calls == []
+        await deck.inject(KeyUp(0))
+        await wait_until(lambda: calls)
+    assert calls == [Action(type="mac.app", args="Terminal")]
 
 
 async def test_keys_without_action_are_ignored(daemon, calls, clock):
@@ -280,7 +300,7 @@ async def test_slow_action_does_not_block_other_keys(make_daemon, clock):
         started.append(action.args)
         await gate.wait()
 
-    daemon = make_daemon(clock, handler=slow)
+    daemon = await make_daemon(clock, handler=slow)
     await press(daemon, 0)
     await press(daemon, 3)
     assert started == ["Ghostty", "Safari"]
@@ -310,7 +330,8 @@ async def test_page_switch_rerenders(daemon, deck):
     assert deck.keys[0].tobytes() == image_bytes(GHOSTTY)
 
 
-async def test_page_switch_marks_render_needed_for_the_loop(daemon, deck):
+async def test_page_switch_marks_render_needed_for_the_loop(unstarted, deck):
+    daemon = unstarted
     async with running(daemon, deck):
         await wait_until(lambda: deck.push_count >= KEYS_AND_SEGMENTS)
         await deck.inject(KeyDown(1), KeyUp(1))
@@ -387,7 +408,8 @@ async def test_store_subscriber_only_marks_render_needed(daemon, deck, store):
     assert deck.push_count == before  # nothing is drawn inside the subscriber
 
 
-async def test_store_change_is_rendered_by_the_loop(daemon, deck, store):
+async def test_store_change_is_rendered_by_the_loop(unstarted, deck):
+    daemon, store = unstarted, unstarted.store
     async with running(daemon, deck):
         await wait_until(lambda: deck.push_count >= KEYS_AND_SEGMENTS)
         before = deck.push_count
@@ -398,7 +420,8 @@ async def test_store_change_is_rendered_by_the_loop(daemon, deck, store):
         assert deck.keys[2].tobytes() == image_bytes(GUEST_ON)
 
 
-async def test_renders_are_throttled_to_20_hz(daemon, deck, store, monkeypatch):
+async def test_renders_are_throttled_to_20_hz(unstarted, deck, monkeypatch):
+    daemon, store = unstarted, unstarted.store
     renders = 0
     real_render = daemon.render
 
@@ -421,7 +444,8 @@ async def test_renders_are_throttled_to_20_hz(daemon, deck, store, monkeypatch):
         assert deck.push_count == pushed
 
 
-async def test_render_failure_does_not_stop_the_loop(daemon, deck, store, monkeypatch, caplog):
+async def test_render_failure_does_not_stop_the_loop(unstarted, deck, monkeypatch, caplog):
+    daemon, store = unstarted, unstarted.store
     real_render = daemon.render
     failures = []
 
@@ -447,7 +471,7 @@ async def test_action_error_flashes_key(make_daemon, deck, clock, caplog):
     async def failing(action: Action) -> None:
         raise RuntimeError("mac is on fire")
 
-    daemon = make_daemon(clock, handler=failing)
+    daemon = await make_daemon(clock, handler=failing)
     daemon.render()
     with caplog.at_level(logging.ERROR, logger="deck.daemon"):
         await press(daemon, 0)
@@ -455,6 +479,7 @@ async def test_action_error_flashes_key(make_daemon, deck, clock, caplog):
     daemon.render()
     assert deck.keys[0].tobytes() == image_bytes(replace(GHOSTTY, **ERROR_COLORS))
     assert "mac is on fire" in caplog.text
+    assert "Ghostty" in caplog.text  # the failed action is logged with its arguments
 
     clock.advance(0.99)
     daemon.render()
@@ -477,7 +502,7 @@ async def test_flash_ends_by_itself_in_the_running_daemon(make_daemon, deck, mon
         raise RuntimeError("nope")
 
     monkeypatch.setattr(daemon_module, "FLASH_SECONDS", 0.1)
-    daemon = make_daemon(handler=failing)  # real clock
+    daemon = await make_daemon(handler=failing, started=False)  # real clock
     async with running(daemon, deck):
         await wait_until(lambda: deck.push_count >= KEYS_AND_SEGMENTS)
         await deck.inject(KeyDown(0), KeyUp(0))
@@ -487,11 +512,42 @@ async def test_flash_ends_by_itself_in_the_running_daemon(make_daemon, deck, mon
         await wait_until(lambda: deck.keys[0].tobytes() == image_bytes(GHOSTTY))
 
 
+async def test_late_failure_flashes_the_key_it_was_pressed_on(make_daemon, deck, clock):
+    gate = asyncio.Event()
+
+    async def fails_late(action: Action) -> None:
+        await gate.wait()
+        raise RuntimeError("late")
+
+    daemon = await make_daemon(clock, handler=fails_late)
+    await press(daemon, 0)
+    gate.set()
+    await settle()
+    daemon.render()
+    assert deck.keys[0].tobytes() == image_bytes(replace(GHOSTTY, **ERROR_COLORS))
+
+
+async def test_late_failure_after_page_switch_does_not_flash_the_new_page(make_daemon, deck, clock):
+    gate = asyncio.Event()
+
+    async def fails_late(action: Action) -> None:
+        await gate.wait()
+        raise RuntimeError("late")
+
+    daemon = await make_daemon(clock, handler=fails_late)
+    await press(daemon, 0)  # slow action on page "home"
+    await press(daemon, 1)  # now on page "second", whose key 0 is another key
+    gate.set()
+    await settle()
+    daemon.render()
+    assert deck.keys[0].tobytes() == image_bytes(home_key("Back", "🏠"))
+
+
 async def test_page_switch_drops_pending_flash(make_daemon, deck, clock):
     async def failing(action: Action) -> None:
         raise RuntimeError("nope")
 
-    daemon = make_daemon(clock, handler=failing)
+    daemon = await make_daemon(clock, handler=failing)
     await press(daemon, 0)
     await press(daemon, 1)
     daemon.render()
@@ -564,19 +620,92 @@ async def test_reload_keeps_current_page_or_falls_back_to_start_page(daemon, con
     assert daemon.current_page == "home"
 
 
+async def plain_services(config, store, stack) -> Services:
+    return Services(store, config, ActionRunner())
+
+
 def test_unreadable_config_at_startup_raises(tmp_path, deck):
     with pytest.raises(ConfigError):
-        Daemon(
-            tmp_path / "missing.yaml",
-            deck,
-            lambda config, store: Services(store, config, ActionRunner()),
-        )
+        Daemon(tmp_path / "missing.yaml", deck, plain_services)
+
+
+async def test_services_are_built_once_and_closed_when_run_ends(config_path, deck):
+    built = []
+    closed = []
+
+    async def factory(config, store, stack) -> Services:
+        built.append(config)
+        stack.callback(closed.append, "sync cleanup")
+
+        async def close() -> None:
+            closed.append("async cleanup")
+
+        stack.push_async_callback(close)
+        return Services(store, config, ActionRunner())
+
+    daemon = Daemon(config_path, deck, factory)
+    assert built == []  # nothing is built before the loop runs
+    async with running(daemon, deck):
+        await wait_until(lambda: built)
+        for i in range(3):
+            config_path.write_text(VALID.replace("label: Ghostty", f"label: Kitty{i}"))
+            assert daemon.reload() is True
+        assert len(built) == 1
+        assert closed == []
+    assert closed == ["async cleanup", "sync cleanup"]
+
+
+async def test_reload_hands_the_new_config_to_the_services(daemon, config_path):
+    services = daemon.services
+    config_path.write_text(VALID.replace("label: Ghostty", "label: Kitty"))
+    assert daemon.reload() is True
+    assert daemon.services is services
+    assert services.config is daemon.config
+    assert services.config.pages["home"].keys[0].label == "Kitty"
+
+
+async def test_factory_failure_stops_run_and_unwinds_the_stack(config_path, deck):
+    closed = []
+
+    async def factory(config, store, stack) -> Services:
+        stack.callback(closed.append, "cleanup")
+        raise RuntimeError("cannot reach the mac")
+
+    daemon = Daemon(config_path, deck, factory)
+    with pytest.raises(RuntimeError, match="cannot reach the mac"):
+        await daemon.run()
+    assert closed == ["cleanup"]
+
+
+async def test_changed_connection_sections_log_a_restart_warning(daemon, config_path, caplog):
+    def warnings() -> list[str]:
+        return [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+
+    with caplog.at_level(logging.WARNING, logger="deck.daemon"):
+        config_path.write_text(VALID.replace("label: Ghostty", "label: Kitty"))
+        assert daemon.reload() is True
+        assert warnings() == []  # pages are applied live
+
+        config_path.write_text(VALID.replace("host: macbook", "host: other-mac"))
+        assert daemon.reload() is True
+        assert warnings() == ["restart deck to apply changes to: mac"]
+
+        caplog.clear()
+        both = VALID.replace("host: macbook", "host: other-mac")
+        config_path.write_text(both.replace("ha.local", "ha.example"))
+        assert daemon.reload() is True
+        assert warnings() == ["restart deck to apply changes to: mac, home_assistant"]
+
+        caplog.clear()
+        config_path.write_text(VALID)  # back to what the services were built with
+        assert daemon.reload() is True
+        assert warnings() == []
 
 
 async def test_watcher_reloads_changed_config(make_daemon, deck, config_path, monkeypatch):
     monkeypatch.setattr(daemon_module, "WATCH_INTERVAL", 0.02)
     monkeypatch.setattr(daemon_module, "WATCH_STABLE", 0.05)
-    daemon = make_daemon()
+    daemon = await make_daemon(started=False)
     async with running(daemon, deck):
         await wait_until(lambda: deck.push_count >= KEYS_AND_SEGMENTS)
         config_path.write_text(VALID.replace("label: Ghostty", "label: Kitty"))
@@ -592,7 +721,7 @@ async def test_watcher_waits_for_the_file_to_stop_changing(
 ):
     monkeypatch.setattr(daemon_module, "WATCH_INTERVAL", 0.02)
     monkeypatch.setattr(daemon_module, "WATCH_STABLE", 0.15)
-    daemon = make_daemon()
+    daemon = await make_daemon(started=False)
     reloads = []
     real_reload = daemon.reload
 
@@ -619,7 +748,7 @@ async def test_watcher_waits_for_the_file_to_stop_changing(
 async def test_watcher_ignores_untouched_config(make_daemon, deck, monkeypatch):
     monkeypatch.setattr(daemon_module, "WATCH_INTERVAL", 0.01)
     monkeypatch.setattr(daemon_module, "WATCH_STABLE", 0.02)
-    daemon = make_daemon()
+    daemon = await make_daemon(started=False)
     reloads = []
     monkeypatch.setattr(daemon, "reload", lambda: reloads.append(1))
     async with running(daemon, deck):
@@ -665,7 +794,7 @@ def dial_log(monkeypatch) -> DialLog:
 
 
 async def test_dial_events_reach_the_handler(make_daemon, dial_log):
-    daemon = make_daemon()
+    daemon = await make_daemon()
     await daemon.handle(DialTurn(0, 3))
     await daemon.handle(DialTurn(0, -1))
     await daemon.handle(DialDown(0))
@@ -675,7 +804,7 @@ async def test_dial_events_reach_the_handler(make_daemon, dial_log):
 
 
 async def test_touch_tap_presses_the_dial_under_it(make_daemon, dial_log):
-    daemon = make_daemon()
+    daemon = await make_daemon()
     await daemon.handle(TouchTap(199, 50))
     await daemon.handle(TouchTap(200, 50))  # dial 1 has no handler
     await daemon.handle(TouchTap(1199, 50))  # dial 5 has no dial at all
@@ -685,7 +814,7 @@ async def test_touch_tap_presses_the_dial_under_it(make_daemon, dial_log):
 
 
 async def test_dials_without_handler_are_ignored(make_daemon, dial_log):
-    daemon = make_daemon()
+    daemon = await make_daemon()
     await daemon.handle(DialTurn(1, 1))  # `input` has no factory
     await daemon.handle(DialDown(1))
     await daemon.handle(DialTurn(4, 1))  # no dial configured
@@ -694,7 +823,7 @@ async def test_dials_without_handler_are_ignored(make_daemon, dial_log):
 
 
 async def test_dial_handlers_are_built_per_page_with_services(make_daemon, dial_log):
-    daemon = make_daemon()
+    daemon = await make_daemon()
     assert len(dial_log.built) == 1
     assert dial_log.built[0].services is daemon.services
     assert dial_log.built[0].spec.kind == "volume"
@@ -715,7 +844,7 @@ async def test_dial_handler_failure_is_logged_not_raised(make_daemon, monkeypatc
     monkeypatch.setattr(
         daemon_module, "DIAL_FACTORIES", {"volume": lambda spec, services: Broken()}
     )
-    daemon = make_daemon()
+    daemon = await make_daemon()
     with caplog.at_level(logging.ERROR, logger="deck.daemon"):
         await daemon.handle(DialTurn(0, 1))
         await daemon.handle(DialDown(0))
@@ -817,7 +946,7 @@ def test_run_builds_daemon_with_deck_and_services(monkeypatch, config_path):
 
     store = StateStore()
     config = load_config(config_path)
-    services = created["services_factory"](config, store)
+    services = asyncio.run(created["services_factory"](config, store, contextlib.AsyncExitStack()))
     assert isinstance(services, Services)
     assert (services.store, services.config) == (store, config)
     assert isinstance(services.actions, ActionRunner)

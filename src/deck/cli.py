@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import logging
+from contextlib import AsyncExitStack
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -99,7 +100,8 @@ def _render(args: argparse.Namespace) -> int:
     return 0
 
 
-def _services(config: Config, store: StateStore) -> Services:
+async def _services(config: Config, store: StateStore, stack: AsyncExitStack) -> Services:
+    """Build the services. Later tasks start their clients here and register cleanup on `stack`."""
     return Services(store, config, actions=ActionRunner())
 
 

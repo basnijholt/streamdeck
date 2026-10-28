@@ -30,6 +30,14 @@ class Services:
 
 
 class DialHandler(Protocol):
+    """Reacts to one dial.
+
+    The daemon awaits `on_turn` inline, in event order, so ticks are never reordered and
+    every other event waits for it: it must return quickly. Slow work (a network request)
+    goes through a `Coalescer`. `on_press` runs as its own task and may take its time.
+    Exceptions from either are logged.
+    """
+
     async def on_turn(self, ticks: int) -> None: ...
 
     async def on_press(self) -> None: ...
