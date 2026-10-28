@@ -31,6 +31,7 @@ DEFAULT_SCRIPTS_DIR = Path("~/.config/deck/scripts")
 ACTION_TIMEOUT = 10  # seconds; every command but the screenshot stays under the PC's 15 s limit
 QUERY_TIMEOUT = 5  # seconds; the poller must not stall on a hung tool
 SCREENSHOT_TIMEOUT = 60  # seconds the selection UI may stay up; it is not awaited by the request
+PIN_FOLLOW_POLLS = 3  # polls after a change of input devices in which the input is still pinned
 BT_CONNECT_TIMEOUT = 4  # seconds for `blueutil --connect`; the rest of the budget goes to polling
 BT_WAIT = 10  # seconds, from the start of the request, for a Bluetooth device to appear
 BT_POLL_INTERVAL = 0.5  # seconds
@@ -478,6 +479,7 @@ class MacPoller(Poller):
         self._runner = runner
         self._executor = executor
         self._input_devices: frozenset[str] | None = None  # as of the previous poll
+        self._pin_polls = 0  # polls left in which a pin is still wanted, after the devices changed
 
     async def snapshot(self) -> dict[str, Any]:
         """The current state; a key whose query failed is left out. Values are fresh each call."""
@@ -527,15 +529,24 @@ class MacPoller(Poller):
     async def _pin_input(self, current: str, available: list[str]) -> str:
         """With `pin_input`, switch back to the preferred input; return the current input.
 
-        Only when the set of input devices changed since the previous poll: that is when macOS
+        Only after the set of input devices changed since the previous poll: that is when macOS
         switches by itself (AirPods connecting, the USB mic being plugged in). Re-pinning on
-        every poll would undo a deliberate choice, such as the input dial's. The first poll
-        only records the devices.
+        every poll would undo a deliberate choice, such as the input dial's. macOS may switch a
+        poll or two after the device shows up, and a pin may fail, so a pin stays wanted for
+        `PIN_FOLLOW_POLLS` more polls, or until one succeeds. The first poll only records the
+        devices.
         """
         executor = self._executor
         devices = frozenset(available)
         known, self._input_devices = self._input_devices, devices
-        if not executor.pin_input or known is None or known == devices:
+        if not executor.pin_input:
+            self._pin_polls = 0
+            return current
+        if known is not None and known != devices:
+            self._pin_polls = PIN_FOLLOW_POLLS
+        elif self._pin_polls > 0:
+            self._pin_polls -= 1
+        else:
             return current
         preferred = preferred_input(available, executor.input_prefs)
         if preferred is None or preferred == current:
@@ -544,5 +555,6 @@ class MacPoller(Poller):
         result = await self._runner.run(argv, timeout=QUERY_TIMEOUT)
         if result.rc != 0:
             log.warning("pinning the input to %s failed: %s", preferred, _first_line(result, argv))
-            return current
+            return current  # tried again on the next poll while the window lasts
+        self._pin_polls = 0
         return preferred

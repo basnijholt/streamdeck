@@ -858,6 +858,95 @@ async def test_pin_input_leaves_a_changed_input_alone_while_the_devices_stay(
     assert switched_input(runner) == []
 
 
+PIN_TO_Q9 = [*SWITCH_INPUT, "-s", "Q9 USB"]
+
+
+async def poll_input(runner, poller, current_input, inputs=AIRPODS_INPUTS) -> str:
+    script_snapshot(runner, current_input=current_input, inputs=inputs)
+    return (await poller.snapshot())["audio.input"]
+
+
+async def test_pin_input_reverts_a_switch_one_poll_after_the_device_appears(
+    poller, runner, executor
+):
+    executor.configure({"audio": {"inputs": ["q9"], "pin_input": True}})
+    await baseline(poller, runner)
+    assert await poll_input(runner, poller, "Q9 USB") == "Q9 USB"  # AirPods listed, not chosen yet
+    assert switched_input(runner) == []
+    assert await poll_input(runner, poller, "AirPods") == "Q9 USB"  # macOS switched a poll later
+    assert switched_input(runner) == [PIN_TO_Q9]
+
+
+async def test_pin_input_keeps_watching_for_three_polls_after_the_change(poller, runner, executor):
+    executor.configure({"audio": {"inputs": ["q9"], "pin_input": True}})
+    await baseline(poller, runner)
+    for _ in range(3):  # the change poll and two more
+        assert await poll_input(runner, poller, "Q9 USB") == "Q9 USB"
+    assert await poll_input(runner, poller, "AirPods") == "Q9 USB"  # the third poll after it
+    assert switched_input(runner) == [PIN_TO_Q9]
+
+
+async def test_pin_input_stops_watching_after_the_window(poller, runner, executor):
+    executor.configure({"audio": {"inputs": ["q9"], "pin_input": True}})
+    await baseline(poller, runner)
+    for _ in range(4):  # the change poll and three more
+        assert await poll_input(runner, poller, "Q9 USB") == "Q9 USB"
+    assert await poll_input(runner, poller, "AirPods") == "AirPods"  # a deliberate choice now
+    assert switched_input(runner) == []
+
+
+async def test_pin_input_retries_a_failed_pin_within_the_window(poller, runner, executor):
+    executor.configure({"audio": {"inputs": ["q9"], "pin_input": True}})
+    await baseline(poller, runner)
+    runner.script(SWITCH_INPUT, Result(1, "", "nope\n"))  # the first attempt fails
+    assert await poll_input(runner, poller, "AirPods") == "AirPods"
+    assert await poll_input(runner, poller, "AirPods") == "Q9 USB"  # retried a poll later
+    assert switched_input(runner) == [PIN_TO_Q9, PIN_TO_Q9]
+
+
+async def test_pin_input_gives_up_a_failing_pin_after_the_window(poller, runner, executor):
+    executor.configure({"audio": {"inputs": ["q9"], "pin_input": True}})
+    await baseline(poller, runner)
+    runner.script(SWITCH_INPUT, *[Result(1, "", "nope\n")] * 10)
+    for _ in range(4):
+        assert await poll_input(runner, poller, "AirPods") == "AirPods"
+    assert await poll_input(runner, poller, "AirPods") == "AirPods"
+    assert len(switched_input(runner)) == 4  # the change poll and the three after it
+
+
+async def test_pin_input_stops_watching_once_pinned(poller, runner, executor):
+    executor.configure({"audio": {"inputs": ["q9"], "pin_input": True}})
+    await baseline(poller, runner)
+    assert await poll_input(runner, poller, "AirPods") == "Q9 USB"
+    # the user (the input dial) then picks AirPods on purpose
+    assert await poll_input(runner, poller, "AirPods") == "AirPods"
+    assert switched_input(runner) == [PIN_TO_Q9]
+
+
+async def test_pin_input_another_device_change_restarts_the_window(poller, runner, executor):
+    executor.configure({"audio": {"inputs": ["q9"], "pin_input": True}})
+    await baseline(poller, runner)
+    for _ in range(3):
+        await poll_input(runner, poller, "Q9 USB")
+    more = (*AIRPODS_INPUTS, "Brio")
+    assert await poll_input(runner, poller, "Q9 USB", more) == "Q9 USB"  # a new device appears
+    for _ in range(2):
+        assert await poll_input(runner, poller, "Q9 USB", more) == "Q9 USB"
+    assert await poll_input(runner, poller, "AirPods", more) == "Q9 USB"
+    assert switched_input(runner) == [PIN_TO_Q9]
+
+
+async def test_pin_input_turned_off_mid_window_stops_watching(poller, runner, executor):
+    executor.configure({"audio": {"inputs": ["q9"], "pin_input": True}})
+    await baseline(poller, runner)
+    await poll_input(runner, poller, "Q9 USB")
+    executor.configure({"audio": {"inputs": ["q9"], "pin_input": False}})
+    assert await poll_input(runner, poller, "AirPods") == "AirPods"
+    executor.configure({"audio": {"inputs": ["q9"], "pin_input": True}})
+    assert await poll_input(runner, poller, "AirPods") == "AirPods"  # the window is gone
+    assert switched_input(runner) == []
+
+
 async def test_pin_input_does_not_pin_on_the_first_poll(poller, runner, executor):
     executor.configure({"audio": {"inputs": ["q9"], "pin_input": True}})
     script_snapshot(runner, current_input="AirPods", inputs=AIRPODS_INPUTS)
