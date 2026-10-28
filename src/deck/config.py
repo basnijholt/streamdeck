@@ -39,6 +39,10 @@ class _Model(BaseModel):
 
 
 def _http_url(value: str) -> str:
+    # urlsplit silently strips/ignores some whitespace and control characters, so it
+    # would validate a different string than the one we return. Reject them up front.
+    if any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in value):
+        raise ValueError("must not contain whitespace or control characters")
     parts = urlsplit(value)
     if parts.scheme.lower() not in {"http", "https"} or not parts.netloc:
         raise ValueError("must be an http or https URL")
@@ -262,6 +266,10 @@ class Config(_Model):
                 what = f"{dial.kind} dial"
                 if dial.kind == "brightness":
                     need(self.ddc, "ddc", (*dial_loc, "kind"), what)
+                elif dial.kind in {"volume", "input"}:
+                    need(self.mac, "mac", (*dial_loc, "kind"), what)
+                    if dial.kind == "input":
+                        need(self.audio, "audio", (*dial_loc, "kind"), what)
                 elif dial.kind in {"t3.effort", "t3.model"}:
                     need(self.t3, "t3", (*dial_loc, "kind"), what)
                 elif dial.kind == "ha.brightness":
@@ -318,7 +326,7 @@ def _format_errors(exc: ValidationError) -> list[str]:
 def load_config(path: Path) -> Config:
     """Load and validate a YAML config file; raise ConfigError on any problem."""
     try:
-        raw = yaml.safe_load(Path(path).read_text())
+        raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     except (OSError, UnicodeError) as exc:
         raise ConfigError([f"file: {exc}"]) from exc
     except yaml.YAMLError as exc:

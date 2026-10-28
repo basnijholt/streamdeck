@@ -59,17 +59,30 @@ def test_unknown_key_rejected(tmp_path):
     assert any(err.startswith("pages.home.keys.0.lable") for err in errs)
 
 
-@pytest.mark.parametrize("url", ["file:///etc/passwd", "javascript:alert(1)", "ssh://x"])
+BAD_URLS = [
+    "file:///etc/passwd",
+    "javascript:alert(1)",
+    "ssh://x",
+    "http://a b",
+    "ht\ntp://x",
+    " http://a",
+    "http://a\n-x",
+    "https://a\x00b",
+    "http://a\x7f",
+]
+
+
+@pytest.mark.parametrize("url", BAD_URLS)
 def test_mac_url_rejects_non_http(tmp_path, url):
     errs = errors_of(tmp_path, home({"press": {"mac.url": url}}, mac=MAC))
     assert any(err.startswith("pages.home.keys.0.press") for err in errs)
 
 
-@pytest.mark.parametrize("url", ["file:///etc/passwd", "javascript:alert(1)"])
+@pytest.mark.parametrize("url", BAD_URLS)
 def test_mac_tab_url_rejects_non_http(tmp_path, url):
     key = {"press": {"mac.tab": {"match": "x", "url": url}}}
-    with pytest.raises(ConfigError):
-        load_config(write(tmp_path, home(key, mac=MAC)))
+    errs = errors_of(tmp_path, home(key, mac=MAC))
+    assert any(err.startswith("pages.home.keys.0.press") for err in errs)
 
 
 def test_mac_url_accepts_http_and_https(tmp_path):
@@ -85,7 +98,7 @@ def test_too_many_keys_rejected(tmp_path):
 
 def test_36_keys_and_6_dials_accepted(tmp_path):
     dials = [{"kind": "volume"}] * 6
-    cfg = load_config(write(tmp_path, home(*[None] * 36, dials=dials)))
+    cfg = load_config(write(tmp_path, home(*[None] * 36, dials=dials, mac=MAC)))
     assert len(cfg.pages["home"].keys) == 36
 
 
@@ -125,6 +138,30 @@ def test_dial_requirements(tmp_path):
     assert any(err.startswith("pages.home.dials.0") and "ddc" in err for err in errs)
     assert any(err.startswith("pages.home.dials.1") and "t3" in err for err in errs)
     assert any(err.startswith("pages.home.dials.2") and "home_assistant" in err for err in errs)
+
+
+def test_volume_and_input_dials_need_mac_and_audio(tmp_path):
+    errs = errors_of(tmp_path, home(dials=[{"kind": "volume"}, {"kind": "input"}]))
+    assert any(err.startswith("pages.home.dials.0") and "mac" in err for err in errs)
+    assert any(err.startswith("pages.home.dials.1") and "mac" in err for err in errs)
+    assert any(err.startswith("pages.home.dials.1") and "audio" in err for err in errs)
+    assert not any(err.startswith("pages.home.dials.0") and "audio" in err for err in errs)
+
+    errs = errors_of(tmp_path, home(dials=[{"kind": "input"}], mac=MAC))
+    assert [e.split(":")[0] for e in errs] == ["pages.home.dials.0.kind"]
+    assert "audio" in errs[0]
+
+    audio = {"outputs": [], "inputs": ["q9"]}
+    ok = home(dials=[{"kind": "volume"}, {"kind": "input"}], mac=MAC, audio=audio)
+    assert len(load_config(write(tmp_path, ok)).pages["home"].dials) == 2
+
+
+def test_utf8_config_loads_when_default_encoding_is_not_utf8(tmp_path, monkeypatch):
+    p = tmp_path / "config.yaml"
+    p.write_text(yaml.safe_dump(home({"icon": "\U0001f47b"}), allow_unicode=True), encoding="utf-8")
+    # Simulate a service environment whose default text encoding is ASCII.
+    monkeypatch.setattr("io.text_encoding", lambda encoding, stacklevel=2: encoding or "ascii")
+    assert load_config(p).pages["home"].keys[0].icon == "\U0001f47b"
 
 
 def test_ha_brightness_dial_needs_entity_id(tmp_path):
