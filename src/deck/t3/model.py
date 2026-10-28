@@ -29,6 +29,15 @@ class Thread:
     updated_at: datetime  # timezone-aware
 
 
+@dataclass(frozen=True)
+class Pending:
+    """A change the effort or model dial is about to apply, for the thread titled `title`."""
+
+    title: str
+    current: str
+    pending: str
+
+
 def thread_state(t: Thread) -> ThreadState:
     """Key state for a thread. Waiting on you beats every other status.
 

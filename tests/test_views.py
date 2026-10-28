@@ -9,7 +9,7 @@ from deck.cli import main
 from deck.config import Config, KeySpec, load_config
 from deck.render import KeyView, SegmentView
 from deck.state import StateStore
-from deck.t3.model import Thread
+from deck.t3.model import Pending, Thread
 from deck.views import key_view, segment_view
 
 EXAMPLE = Path(__file__).parent.parent / "examples" / "config.yaml"
@@ -395,18 +395,45 @@ def test_segment_brightness_error(cfg, store):
     assert segment_view(dial(kind="brightness"), store, cfg).value == "80%"
 
 
-@pytest.mark.parametrize("kind", ["effort", "model"])
-def test_segment_t3_dials(cfg, store, kind):
+@pytest.mark.parametrize("kind,title", [("effort", "🧠 Effort"), ("model", "🤖 Model")])
+def test_segment_t3_dials_idle_and_messages(cfg, store, kind, title):
     spec = dial(kind=f"t3.{kind}")
-    assert segment_view(spec, store, cfg).value == "turn to read"
-    store.set(f"t3.pending.{kind}", "xhigh → high")
-    assert segment_view(spec, store, cfg).value == "xhigh → high"
+    assert segment_view(spec, store, cfg) == SegmentView(title, "turn to read")
+    store.set(f"t3.pending.{kind}", "thread changed — not applied")
+    assert segment_view(spec, store, cfg) == SegmentView(title, "thread changed — not applied")
     store.set(f"t3.pending.{kind}", None)
-    assert segment_view(spec, store, cfg).value == "turn to read"
+    assert segment_view(spec, store, cfg) == SegmentView(title, "turn to read")
+
+
+def test_segment_t3_effort_pending_shows_thread_value_and_origin(cfg, store):
+    store.set("t3.pending.effort", Pending("Fix the thing", "xhigh", "high"))
+    view = segment_view(dial(kind="t3.effort"), store, cfg)
+    assert view == SegmentView("🧠 Fix the thing", "high", detail="from xhigh")
+
+
+def test_segment_t3_model_pending_shows_thread_value_and_origin(cfg, store):
+    store.set("t3.pending.model", Pending("Fix the thing", "claude-opus-5-5", "claude-sonnet-5-5"))
+    view = segment_view(dial(kind="t3.model"), store, cfg)
+    assert view == SegmentView(
+        "🤖 Fix the thing", "claude-sonnet-5-5", detail="from claude-opus-5-5"
+    )
+
+
+def test_segment_t3_message_is_never_parsed(cfg, store):
+    # a message may contain the separator a pending change used to be written with
+    store.set("t3.pending.effort", "error: a · b → c")
+    assert segment_view(dial(kind="t3.effort"), store, cfg) == SegmentView(
+        "🧠 Effort", "error: a · b → c"
+    )
+
+
+def test_segment_t3_pending_without_a_title_falls_back_to_the_dial_name(cfg, store):
+    store.set("t3.pending.model", Pending("", "a", "b"))
+    assert segment_view(dial(kind="t3.model"), store, cfg).title == "🤖 Model"
 
 
 def test_segment_t3_pending_kinds_are_separate(cfg, store):
-    store.set("t3.pending.model", "opus")
+    store.set("t3.pending.model", Pending("t", "a", "b"))
     assert segment_view(dial(kind="t3.effort"), store, cfg).value == "turn to read"
 
 

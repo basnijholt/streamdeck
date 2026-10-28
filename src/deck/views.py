@@ -8,7 +8,7 @@ from deck.audio import matches, preferred_input
 from deck.config import Config, DialSpec, KeySpec
 from deck.render import SHEET_BG, KeyView, SegmentView
 from deck.state import StateStore
-from deck.t3.model import Thread, thread_state
+from deck.t3.model import Pending, Thread, thread_state
 
 # (background, border) pairs from the approved mockup.
 DEFAULT = ("#1c1c21", "#2a2a31")
@@ -133,12 +133,22 @@ def segment_view(spec: DialSpec | None, store: StateStore, cfg: Config) -> Segme
                 return SegmentView("☀️ Brightness", "❌")
             return _percent("☀️ Brightness", store.get("ddc.brightness"))
         case "t3.effort" | "t3.model":
-            kind = spec.kind.removeprefix("t3.")
-            title = "🧠 Effort" if kind == "effort" else "🤖 Model"
-            return SegmentView(title, store.get(f"t3.pending.{kind}") or "turn to read")
+            return _t3_segment(spec.kind.removeprefix("t3."), store)
         case "ha.brightness":
             return _ha_brightness_segment(spec, store)
     raise AssertionError(f"unhandled dial kind {spec.kind!r}")  # pragma: no cover
+
+
+def _t3_segment(kind: str, store: StateStore) -> SegmentView:
+    """The effort or model dial: a pending change (the thread, and what it would go from and
+    to), else a message, else the prompt to turn."""
+    icon, name = ("🧠", "Effort") if kind == "effort" else ("🤖", "Model")
+    shown = store.get(f"t3.pending.{kind}")
+    if isinstance(shown, Pending):
+        return SegmentView(
+            f"{icon} {shown.title or name}", shown.pending, detail=f"from {shown.current}"
+        )
+    return SegmentView(f"{icon} {name}", shown or "turn to read")
 
 
 def _percent(title: str, value: int | None) -> SegmentView:

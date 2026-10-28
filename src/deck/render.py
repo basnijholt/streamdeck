@@ -57,6 +57,7 @@ class SegmentView:
     value: str
     bar: float | None = None
     color: str = "#3b82f6"
+    detail: str | None = None  # small and muted below the value; not drawn next to a bar
 
 
 # --- fonts ------------------------------------------------------------------
@@ -244,13 +245,42 @@ def _draw_badge(img: Image.Image, draw: ImageDraw.ImageDraw, badge: str) -> None
 
 
 VALUE_EMOJI_SIZE = 30
+VALUE_SIZES = (30, 24, 20, 16)  # the value takes the largest of these that fits the segment
+DETAIL_SIZE = 12
+SEGMENT_PAD = 12
+
+
+def fit_value(draw: ImageDraw.ImageDraw, text: str, width: int) -> tuple[list[str], int]:
+    """The lines and the font size at which a segment shows `text` within `width` pixels.
+
+    One line at the largest of `VALUE_SIZES` that fits. A text that does not fit even at the
+    smallest size goes onto two lines there, split at ` — ` if it has one, else after as many
+    words as fit on the first line. Only what still does not fit on a line is ellipsized.
+    """
+    text = _plain(text)
+    for size in VALUE_SIZES:
+        if draw.textlength(text, font=_text_font(size)) <= width:
+            return [text], size
+    size = VALUE_SIZES[-1]
+    font = _text_font(size)
+    if " — " in text:
+        first, _, second = text.partition(" — ")
+    else:
+        words = text.split()
+        if len(words) < 2:
+            return [_ellipsize(draw, text, font, width)], size
+        fit = len(words) - 1
+        while fit > 1 and draw.textlength(" ".join(words[:fit]), font=font) > width:
+            fit -= 1
+        first, second = " ".join(words[:fit]), " ".join(words[fit:])
+    return [_ellipsize(draw, first, font, width), _ellipsize(draw, second, font, width)], size
 
 
 def draw_segment(view: SegmentView) -> Image.Image:
     width, height = SEGMENT_SIZE
     img = Image.new("RGB", SEGMENT_SIZE, _rgb(SEGMENT_BG))
     draw = ImageDraw.Draw(img)
-    pad = 12
+    pad = SEGMENT_PAD
     max_text = width - 2 * pad
 
     title_font = _text_font(16)
@@ -274,9 +304,15 @@ def draw_segment(view: SegmentView) -> Image.Image:
     if value_emoji is not None:
         img.paste(value_emoji, (pad, 52 - value_emoji.height // 2), value_emoji)
     else:
-        value_font = _text_font(30)
-        value = _ellipsize(draw, _plain(view.value), value_font, max_text)
-        draw.text((pad, 52), value, font=value_font, fill=_rgb(TEXT_COLOR), anchor="lm")
+        lines, size = fit_value(draw, view.value, max_text)
+        centers = [52] if len(lines) == 1 else [43, 63]
+        for line, y in zip(lines, centers, strict=True):
+            draw.text((pad, y), line, font=_text_font(size), fill=_rgb(TEXT_COLOR), anchor="lm")
+
+    if view.detail and view.bar is None:
+        font = _text_font(DETAIL_SIZE)
+        detail = _ellipsize(draw, _plain(view.detail), font, max_text)
+        draw.text((pad, 84), detail, font=font, fill=_rgb(MUTED_COLOR), anchor="lm")
 
     if view.bar is not None:
         fraction = min(1.0, max(0.0, view.bar))

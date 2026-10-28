@@ -28,7 +28,7 @@ from deck.config import DialSpec, T3Config, T3Server
 from deck.dials import DIAL_FACTORIES, Services
 from deck.mac.client import MacClient, MacError, MacOffline
 from deck.state import StateStore
-from deck.t3.model import Thread, thread_state, visible_threads
+from deck.t3.model import Pending, Thread, thread_state, visible_threads
 from deck.t3.source import ModelSelection, T3Error, T3Source
 
 log = logging.getLogger(__name__)
@@ -65,7 +65,8 @@ class T3Controller:
         self.sleep = sleep
         self._tasks: set[asyncio.Task[None]] = set()
         self._dials: dict[str, _ThreadDial] = {}
-        self._status_since: dict[tuple[str, str], tuple[str, float]] = {}
+        self._state_since: dict[tuple[str, str], tuple[str, float]] = {}
+        self.selection_lock = asyncio.Lock()  # a selection is read, changed and set as a whole
         self._elapsed_ticks = 0
         store.subscribe(self._on_store_change)
         self._merge()
@@ -92,7 +93,7 @@ class T3Controller:
             self._merge()
 
     def _merge(self) -> None:
-        """Put every server's thread list into `t3.threads`, and note when statuses began."""
+        """Put every server's thread list into `t3.threads`, and note when states began."""
         threads: list[Thread] = []
         for server in self.cfg.servers:
             threads += self.store.get(f"t3.threads.{server.name}", [])
@@ -100,19 +101,20 @@ class T3Controller:
         since: dict[tuple[str, str], tuple[str, float]] = {}
         for thread in threads:
             key = (thread.server, thread.thread_id)
-            known = self._status_since.get(key)
-            if known is None or known[0] != thread.status:
-                known = (thread.status, now)
-            since[key] = known
-        self._status_since = since
+            state = thread_state(thread)
+            known = self._state_since.get(key)
+            since[key] = known if known is not None and known[0] == state else (state, now)
+        self._state_since = since
         self.store.set("t3.threads", threads)
 
     def running_for(self, thread: Thread) -> float:
-        """Seconds since the deck first saw `thread` with its current status."""
+        """Seconds since the deck first saw `thread` in the state its key shows (queued, starting
+        and running are all `working`)."""
         key = (thread.server, thread.thread_id)
-        known = self._status_since.get(key)
-        if known is None or known[0] != thread.status:
-            known = self._status_since[key] = (thread.status, self.clock())
+        state = thread_state(thread)
+        known = self._state_since.get(key)
+        if known is None or known[0] != state:
+            known = self._state_since[key] = (state, self.clock())
         return self.clock() - known[1]
 
     async def tick_forever(self) -> None:
@@ -216,6 +218,7 @@ class _ThreadDial:
         self._last_turn = 0.0
         self._read: asyncio.Task[None] | None = None
         self._applying = False
+        self._notice = False  # a message is on the strip: turning does nothing until it clears
         self._timer: asyncio.Task[None] | None = None
 
     # What a kind picks.
@@ -242,8 +245,8 @@ class _ThreadDial:
         if ctl.mac is None:
             self._message(NO_MAC)
             return
-        if self._applying:
-            return  # the outcome of the press is about to replace the pending value
+        if self._applying or self._notice:
+            return  # the outcome of the press, or the message, is on the strip for a moment
         now = ctl.clock()
         if self._reading:
             self._ticks += ticks
@@ -258,6 +261,7 @@ class _ThreadDial:
         """Start reading which thread is in front; the turns so far are added up meanwhile."""
         self._cancel_timer()
         self._capture = None
+        self._notice = False
         self._ticks = ticks
         self._publish(READING)
         self._read = self._ctl.spawn(self._read_front())
@@ -315,7 +319,7 @@ class _ThreadDial:
         capture.value = choices[(position + ticks) % len(choices)]
 
     def _show(self, capture: _Capture) -> None:
-        self._publish(f"{capture.title} · {capture.current} → {capture.value}")
+        self._publish(Pending(capture.title, capture.current, capture.value))
         self._arm(IDLE_SECONDS)
 
     # Pressing.
@@ -339,40 +343,53 @@ class _ThreadDial:
             self._applying = False
 
     async def _apply(self, capture: _Capture) -> None:
-        """Set the pending value if the thread the turns were about is still the one in front."""
-        front = await self._ctl.thread_in_front()
-        if front is None or (front.server, front.thread_id) != (capture.server, capture.thread_id):
-            self._message(CHANGED)
-            return
-        source = self._ctl.sources[capture.server]
-        # What the thread has now, not what the list showed a moment ago: a set replaces it all.
-        current = await source.get_model_selection(capture.thread_id)
-        if current.instance_id != capture.instance_id:
-            self._message(CHANGED)  # the choices were for another provider
-            return
-        selection = self._with_value(current, capture.value)
-        if selection is None:
-            self._message(self._unavailable(current.instance_id))
-            return
-        await source.set_model_selection(capture.thread_id, selection)
+        """Set the pending value if the thread the turns were about is still the one in front.
+
+        The effort and model presses take turns: each reads the whole selection and sets it
+        whole, so overlapping ones would let the second undo the first. The front tab is read
+        inside the lock too, so it is never older than the wait for the other press.
+        """
+        async with self._ctl.selection_lock:
+            front = await self._ctl.thread_in_front()
+            if front is None or (front.server, front.thread_id) != (
+                capture.server,
+                capture.thread_id,
+            ):
+                self._message(CHANGED)
+                return
+            source = self._ctl.sources[capture.server]
+            # What the thread has now, not what the list showed a moment ago: a set replaces
+            # it all.
+            current = await source.get_model_selection(capture.thread_id)
+            if current.instance_id != capture.instance_id:
+                self._message(CHANGED)  # the choices were for another provider
+                return
+            selection = self._with_value(current, capture.value)
+            if selection is None:
+                self._message(self._unavailable(current.instance_id))
+                return
+            await source.set_model_selection(capture.thread_id, selection)
         self._cancel_timer()
         self._reset()
 
     # The strip.
 
-    def _publish(self, text: str | None) -> None:
-        self._ctl.store.set(f"t3.pending.{self.kind}", text)
+    def _publish(self, shown: str | Pending | None) -> None:
+        self._ctl.store.set(f"t3.pending.{self.kind}", shown)
 
     def _message(self, text: str) -> None:
-        """Show `text` for a moment, then clear it. The next turn reads the front tab again."""
+        """Show `text` for a moment, then clear it. Turning does nothing meanwhile; the first
+        turn after it reads the front tab again."""
         self._capture = None
         self._ticks = 0
+        self._notice = True
         self._publish(text)
         self._arm(MESSAGE_SECONDS)
 
     def _reset(self) -> None:
         self._capture = None
         self._ticks = 0
+        self._notice = False
         self._publish(None)
 
     def _arm(self, delay: float) -> None:

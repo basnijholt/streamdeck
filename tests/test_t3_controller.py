@@ -12,7 +12,7 @@ from deck.dials import DIAL_FACTORIES, Services
 from deck.mac.client import MacError, MacOffline
 from deck.state import StateStore
 from deck.t3.controller import EffortDial, ModelDial, T3Controller
-from deck.t3.model import Thread
+from deck.t3.model import Pending, Thread
 from deck.t3.source import ModelSelection, T3Client, T3Error
 
 ENV_ID = "6cd1637d-2c2f-4fa6-8cd2-fa04748043e2"
@@ -156,12 +156,16 @@ class FakeSource(T3Client):
 
     async def get_model_selection(self, thread_id):
         self.reads.append(thread_id)
-        return self.selections[thread_id]
+        current = self.selections[thread_id]
+        await asyncio.sleep(0)  # a round trip: other presses get their turn meanwhile
+        return current
 
     async def set_model_selection(self, thread_id, selection):
         if self.error is not None:
             raise self.error
+        await asyncio.sleep(0)
         self.calls.append((thread_id, selection))
+        self.selections[thread_id] = selection  # the server replaces the whole selection
 
 
 @pytest.fixture
@@ -410,11 +414,11 @@ async def test_press_applies_the_current_selection_not_the_cached_one(ctrl, mac,
 async def test_pending_shows_title_current_and_pending(ctrl, mac, store, effort):
     mac.active_urls = [url_of(T1)]
     await effort.on_turn(-1)
-    assert pending(store) == "First · xhigh → high"
+    assert pending(store) == Pending("First", "xhigh", "high")
     await effort.on_turn(-1)  # later turns step from the pending value
-    assert pending(store) == "First · xhigh → medium"
+    assert pending(store) == Pending("First", "xhigh", "medium")
     await effort.on_turn(+1)
-    assert pending(store) == "First · xhigh → high"
+    assert pending(store) == Pending("First", "xhigh", "high")
     assert mac.reads == 1
 
 
@@ -422,9 +426,9 @@ async def test_effort_wraps_around(ctrl, mac, store, effort):
     mac.active_urls = [url_of(T1)]
     await effort.on_turn(+1)  # xhigh → max
     await effort.on_turn(+1)
-    assert pending(store) == "First · xhigh → low"
+    assert pending(store) == Pending("First", "xhigh", "low")
     await effort.on_turn(-1)
-    assert pending(store) == "First · xhigh → max"
+    assert pending(store) == Pending("First", "xhigh", "max")
 
 
 @pytest.mark.parametrize("ticks,expected", [(+1, "low"), (-1, "max"), (+3, "high")])
@@ -435,7 +439,7 @@ async def test_effort_unknown_current_value_is_entered_from_the_end_turned_away_
     store.set("t3.threads.pc", [odd])
     mac.active_urls = [url_of(odd)]
     await effort.on_turn(ticks)
-    assert pending(store) == f"First · ultra → {expected}"
+    assert pending(store) == Pending("First", "ultra", expected)
 
 
 async def test_effort_not_offered_by_the_provider_shows_n_a(ctrl, mac, source, store, effort):
@@ -471,9 +475,9 @@ async def test_model_applies_and_keeps_instance_and_options(ctrl, mac, source, m
 async def test_model_dial_only_offers_instance_models(ctrl, mac, source, store, model):
     mac.active_urls = [url_of(CODEX_THREAD), url_of(CODEX_THREAD)]
     await model.on_turn(+1)
-    assert pending(store, "model") == "Codex one · gpt-5 → gpt-5-mini"
+    assert pending(store, "model") == Pending("Codex one", "gpt-5", "gpt-5-mini")
     await model.on_turn(+1)  # wraps inside the codex list; no claude model ever shows up
-    assert pending(store, "model") == "Codex one · gpt-5 → gpt-5"
+    assert pending(store, "model") == Pending("Codex one", "gpt-5", "gpt-5")
     await model.on_turn(-1)
     await model.on_press()
     assert source.calls == [(CODEX_THREAD.thread_id, selection(CODEX_THREAD, model="gpt-5-mini"))]
@@ -507,8 +511,8 @@ async def test_effort_and_model_dials_are_independent(ctrl, mac, store, effort, 
     mac.active_urls = [url_of(T1), url_of(T1)]
     await effort.on_turn(-1)
     await model.on_turn(+1)
-    assert pending(store, "effort") == "First · xhigh → high"
-    assert pending(store, "model") == "First · claude-opus-5-5 → claude-sonnet-5-5"
+    assert pending(store, "effort") == Pending("First", "xhigh", "high")
+    assert pending(store, "model") == Pending("First", "claude-opus-5-5", "claude-sonnet-5-5")
 
 
 # --- only ever the thread in front ------------------------------------------
@@ -617,7 +621,7 @@ async def test_successful_apply_clears_the_pending_and_the_next_turn_reads_again
     await effort.on_press()  # nothing is pending any more
     assert len(source.calls) == 1
     await effort.on_turn(-1)
-    assert mac.reads == 3 and pending(store) == "Second · xhigh → high"
+    assert mac.reads == 3 and pending(store) == Pending("Second", "xhigh", "high")
 
 
 async def test_a_second_press_while_applying_is_ignored(ctrl, mac, source, store, effort):
@@ -632,6 +636,22 @@ async def test_a_second_press_while_applying_is_ignored(ctrl, mac, source, store
     gate.set()
     await first
     assert len(source.calls) == 1
+
+
+async def test_concurrent_effort_and_model_presses_both_land(
+    ctrl, mac, source, store, effort, model
+):
+    mac.active_urls = [url_of(T1)] * 4
+    await effort.on_turn(+1)
+    await model.on_turn(+1)
+    await asyncio.gather(effort.on_press(), model.on_press())
+    # each press reads and sets the whole selection: without taking turns, the second would
+    # set the options it read before the first landed, and undo it
+    assert source.selections[T1.thread_id] == ModelSelection(
+        "claudeAgent", "claude-sonnet-5-5", (("effort", "max"), ("fastMode", False))
+    )
+    assert len(source.calls) == 2
+    assert pending(store, "effort") is None and pending(store, "model") is None
 
 
 # --- timers -----------------------------------------------------------------
@@ -660,7 +680,7 @@ async def test_pending_clears_after_idle(ctrl, mac, source, store, effort, time)
     mac.active_urls = [url_of(T1), url_of(T1)]
     await effort.on_turn(-1)
     await time.advance(9.9)
-    assert pending(store) == "First · xhigh → high"
+    assert pending(store) == Pending("First", "xhigh", "high")
     await time.advance(0.2)
     assert pending(store) is None
     await effort.on_press()  # the capture is gone with the text: nothing to apply
@@ -673,7 +693,7 @@ async def test_each_turn_restarts_the_idle_time(ctrl, mac, store, effort, time):
     for _ in range(3):
         await time.advance(8)
         await effort.on_turn(-1)
-    assert pending(store) == "First · xhigh → max"  # four steps down from xhigh, wrapped
+    assert pending(store) == Pending("First", "xhigh", "max")  # four steps down from xhigh, wrapped
     assert mac.reads == 1
 
 
@@ -683,7 +703,7 @@ async def test_first_turn_after_idle_reads_the_tab_again(ctrl, mac, store, effor
     await time.advance(10.5)
     await effort.on_turn(-1)
     assert mac.reads == 2
-    assert pending(store) == "Second · xhigh → high"
+    assert pending(store) == Pending("Second", "xhigh", "high")
 
 
 async def test_stale_capture_is_read_again_even_if_its_timer_did_not_fire(
@@ -694,18 +714,47 @@ async def test_stale_capture_is_read_again_even_if_its_timer_did_not_fire(
     time.now += 11  # the clock moved on, the timer has not run yet
     await effort.on_turn(-1)
     assert mac.reads == 2
-    assert pending(store) == "Second · xhigh → high"
+    assert pending(store) == Pending("Second", "xhigh", "high")
 
 
-async def test_a_message_does_not_survive_into_the_next_read(ctrl, mac, store, effort, time):
+async def test_turning_does_nothing_while_a_message_is_shown(ctrl, mac, store, effort, time):
     mac.active_urls = ["https://mail.google.com/", url_of(T1)]
     await effort.on_turn(+1)
+    assert pending(store) == NO_THREAD
     await time.advance(1)
-    await effort.on_turn(+1)  # still inside the two seconds: it reads again
+    await effort.on_turn(+1)  # inside the two seconds: no read, the message stays as it was
+    await effort.on_turn(-1)
+    assert mac.reads == 1
+    assert pending(store) == NO_THREAD
+    await time.advance(1.1)  # the first turn's two seconds, not extended by the others
+    assert pending(store) is None
+    await effort.on_turn(+1)  # the message is gone: this one reads the tab again
     assert mac.reads == 2
-    assert pending(store) == "First · xhigh → max"
-    await time.advance(1.5)  # the first message's timer must not wipe this
-    assert pending(store) == "First · xhigh → max"
+    assert pending(store) == Pending("First", "xhigh", "max")
+
+
+async def test_turning_does_nothing_while_a_press_message_is_shown(
+    ctrl, mac, source, store, effort, time
+):
+    mac.active_urls = [url_of(T1), url_of(T2), url_of(T1)]
+    await effort.on_turn(+1)
+    await effort.on_press()
+    assert pending(store) == CHANGED
+    await effort.on_turn(+1)
+    assert mac.reads == 2 and pending(store) == CHANGED
+    await time.advance(2.1)
+    await effort.on_turn(+1)
+    assert mac.reads == 3
+    assert pending(store) == Pending("First", "xhigh", "max")
+
+
+async def test_a_message_timer_does_not_wipe_a_later_pending(ctrl, mac, store, effort, time):
+    mac.active_urls = ["https://mail.google.com/", url_of(T1)]
+    await effort.on_turn(+1)
+    await time.advance(2.1)
+    await effort.on_turn(+1)
+    await time.advance(1)
+    assert pending(store) == Pending("First", "xhigh", "max")
 
 
 async def test_press_does_not_expire_while_it_is_applying(ctrl, mac, source, store, effort, time):
@@ -715,7 +764,7 @@ async def test_press_does_not_expire_while_it_is_applying(ctrl, mac, source, sto
     press = asyncio.create_task(effort.on_press())
     await settle()
     await time.advance(11)  # the apply is slow; the idle timer must not drop its capture
-    assert pending(store) == "First · xhigh → max"
+    assert pending(store) == Pending("First", "xhigh", "max")
     mac.gate.set()
     await press
     assert len(source.calls) == 1
@@ -741,7 +790,7 @@ async def test_turns_during_the_read_are_not_lost(ctrl, mac, store, effort):
     assert pending(store) == "reading…"
     mac.gate.set()
     await settle()
-    assert pending(store) == "First · xhigh → medium"  # two net steps down from xhigh
+    assert pending(store) == Pending("First", "xhigh", "medium")  # two net steps down from xhigh
     assert mac.reads == 1
 
 
@@ -753,7 +802,7 @@ async def test_press_while_reading_is_ignored(ctrl, mac, source, store, effort):
     mac.gate.set()
     await settle()
     assert source.calls == []
-    assert pending(store) == "First · xhigh → high"
+    assert pending(store) == Pending("First", "xhigh", "high")
     assert mac.reads == 1
 
 
@@ -792,6 +841,31 @@ async def test_running_for_starts_again_when_the_status_changes(ctrl, store, tim
     running = replace(T1, status="running")
     store.set("t3.threads.pc", [running])
     assert ctrl.running_for(running) == 0
+
+
+async def test_running_for_keeps_counting_across_working_statuses(ctrl, store, time):
+    queued = replace(T1, status="queued")
+    store.set("t3.threads.pc", [queued])
+    await time.advance(40)
+    starting = replace(T1, status="starting")
+    store.set("t3.threads.pc", [starting])
+    await time.advance(40)
+    running = replace(T1, status="running")
+    store.set("t3.threads.pc", [running])
+    await time.advance(40)
+    assert ctrl.running_for(running) == 120  # all three keys read `working`
+
+
+async def test_running_for_starts_again_when_a_request_makes_it_needs_you(ctrl, store, time):
+    running = replace(T1, status="running")
+    store.set("t3.threads.pc", [running])
+    await time.advance(60)
+    asking = replace(running, pending_requests=1)  # same status, but the key turns amber
+    store.set("t3.threads.pc", [asking])
+    assert ctrl.running_for(asking) == 0
+    store.set("t3.threads.pc", [running])
+    await time.advance(5)
+    assert ctrl.running_for(running) == 5
 
 
 async def test_running_for_an_unlisted_thread_counts_from_now(ctrl, time):

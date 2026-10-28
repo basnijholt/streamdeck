@@ -2,7 +2,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from deck import render
 from deck.cli import main
@@ -198,3 +198,134 @@ def test_lone_emoji_falls_back_to_text_without_an_emoji_font(monkeypatch):
     assert count_pixels(key, BADGE_BOX, lambda rgb: rgb == PILL) > 100  # text badge on its pill
     seg = draw_segment(SegmentView(title="🔴", value="❌"))
     assert seg.size == (200, 100)
+
+
+# --- segment values fit the segment -----------------------------------------
+
+SEGMENT_TEXT_WIDTH = 176  # 200 px less 12 px of padding on each side
+SEGMENT_BG = (0x1C, 0x1C, 0x21)
+PENDING_VALUES = ["low", "medium", "xhigh", "claude-sonnet-5-5", "claude-haiku-5-5", "gpt-5-mini"]
+T3_MESSAGES = [
+    "turn to read",
+    "reading…",
+    "no T3 thread in front",
+    "no Mac configured",
+    "Mac offline",
+]
+PAIR_MESSAGES = [
+    "thread changed — not applied",
+    "Mac offline — not applied",
+    "effort n/a for claudeAgent",
+    "no models for mystery",
+]
+
+
+@pytest.fixture
+def measure() -> ImageDraw.ImageDraw:
+    return ImageDraw.Draw(Image.new("RGB", (10, 10)))
+
+
+def ink_columns(img: Image.Image, box) -> list[int]:
+    """The x of every column of `box` that has something other than the background in it."""
+    region = img.crop(box)
+    return [
+        box[0] + x
+        for x in range(region.width)
+        if any(region.getpixel((x, y)) != SEGMENT_BG for y in range(region.height))
+    ]
+
+
+@pytest.mark.parametrize("text", ["80%", "On", "iLoud"])
+def test_short_values_keep_the_full_size(measure, text):
+    assert render.fit_value(measure, text, SEGMENT_TEXT_WIDTH) == ([text], 30)
+
+
+@pytest.mark.parametrize("text", PENDING_VALUES + T3_MESSAGES)
+def test_a_value_is_shrunk_until_it_fits_instead_of_cut(measure, text):
+    lines, size = render.fit_value(measure, text, SEGMENT_TEXT_WIDTH)
+    assert lines == [text]  # not ellipsized, not split
+    assert size in render.VALUE_SIZES
+    assert measure.textlength(text, font=render._text_font(size)) <= SEGMENT_TEXT_WIDTH
+    larger = [s for s in render.VALUE_SIZES if s > size]
+    assert all(
+        measure.textlength(text, font=render._text_font(s)) > SEGMENT_TEXT_WIDTH for s in larger
+    )  # and it is the largest size that fits
+
+
+def test_long_model_name_needs_a_smaller_font_than_the_default(measure):
+    _, size = render.fit_value(measure, "claude-sonnet-5-5", SEGMENT_TEXT_WIDTH)
+    assert size < 30
+
+
+@pytest.mark.parametrize(
+    "text,lines",
+    [
+        ("thread changed — not applied", ["thread changed", "not applied"]),
+        ("Mac offline — not applied", ["Mac offline", "not applied"]),
+    ],
+)
+def test_a_message_with_a_dash_that_cannot_fit_is_split_there(measure, text, lines):
+    got, size = render.fit_value(measure, text, SEGMENT_TEXT_WIDTH)
+    assert (got, size) == (lines, 16)
+
+
+@pytest.mark.parametrize(
+    "text,lines",
+    [
+        ("effort n/a for claudeAgent", ["effort n/a for", "claudeAgent"]),
+        ("no models for mystery", ["no models for", "mystery"]),
+    ],
+)
+def test_a_long_message_without_a_dash_wraps_at_a_space_instead_of_cutting(measure, text, lines):
+    assert render.fit_value(measure, text, SEGMENT_TEXT_WIDTH) == (lines, 16)
+
+
+def test_only_what_still_does_not_fit_at_the_smallest_size_is_ellipsized(measure):
+    lines, size = render.fit_value(measure, "error: " + "x" * 80, SEGMENT_TEXT_WIDTH)
+    assert size == 16 and len(lines) == 2 and lines[0] == "error:" and lines[1].endswith("…")
+    one, size = render.fit_value(measure, "y" * 80, SEGMENT_TEXT_WIDTH)
+    assert size == 16 and len(one) == 1 and one[0].endswith("…")
+    for line in [*lines, *one]:
+        assert measure.textlength(line, font=render._text_font(16)) <= SEGMENT_TEXT_WIDTH
+
+
+@pytest.mark.parametrize("text", PENDING_VALUES + T3_MESSAGES + PAIR_MESSAGES)
+def test_drawn_value_stays_inside_the_segment(text):
+    img = draw_segment(SegmentView(title="🧠 Effort", value=text))
+    columns = ink_columns(img, (0, 32, 200, 74))
+    assert columns, "the value was not drawn"
+    assert min(columns) >= 11 and max(columns) <= 200 - 12
+
+
+def test_two_line_value_uses_two_rows():
+    one = draw_segment(SegmentView(title="🧠 Effort", value="no Mac"))
+    two = draw_segment(SegmentView(title="🧠 Effort", value="thread changed — not applied"))
+
+    def ink_bands(img: Image.Image) -> int:
+        """How many separate bands of rows have ink: one per line of text."""
+        rows = [bool(ink_columns(img, (0, y, 200, y + 1))) for y in range(32, 76)]
+        starts = zip([False, *rows], rows, strict=False)  # a row with ink after one without
+        return sum(1 for before, now in starts if now and not before)
+
+    assert (ink_bands(one), ink_bands(two)) == (1, 2)
+
+
+def test_detail_is_drawn_small_below_the_value_when_there_is_no_bar():
+    plain = draw_segment(SegmentView(title="🧠 First", value="high"))
+    detail = draw_segment(SegmentView(title="🧠 First", value="high", detail="from xhigh"))
+    assert ink_columns(detail, (0, 76, 200, 92)) and not ink_columns(plain, (0, 76, 200, 92))
+    top = [y for y in range(100) if ink_columns(detail, (0, y, 200, y + 1))]
+    assert max(y for y in top if y > 74) <= 95  # near the bottom, inside the segment
+    assert detail.crop((0, 0, 200, 74)).tobytes() == plain.crop((0, 0, 200, 74)).tobytes()
+
+
+def test_detail_is_not_drawn_next_to_a_bar():
+    bar = SegmentView(title="🔊 iLoud", value="40%", bar=0.4)
+    with_detail = draw_segment(SegmentView(**{**bar.__dict__, "detail": "from 30%"}))
+    assert with_detail.tobytes() == draw_segment(bar).tobytes()
+
+
+def test_long_detail_is_ellipsized_to_fit():
+    img = draw_segment(SegmentView(title="🤖 t", value="x", detail="from " + "m" * 60))
+    columns = ink_columns(img, (0, 76, 200, 92))
+    assert columns and max(columns) <= 200 - 12
