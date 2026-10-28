@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import sys
+from collections.abc import Coroutine
 from contextlib import AsyncExitStack
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,9 +15,12 @@ from deck.actions import ActionRunner
 from deck.config import Config, ConfigError, load_config
 from deck.control import call, default_control_path
 from deck.daemon import Daemon
+from deck.ddc import Ddc
 from deck.device import StreamDeckDevice
 from deck.dials import Services
+from deck.local import register_local_actions
 from deck.render import compose_deck, draw_key, draw_segment
+from deck.runner import Runner
 from deck.state import StateStore
 from deck.t3.model import Thread, visible_threads
 from deck.views import key_view, segment_view
@@ -102,9 +106,26 @@ def _render(args: argparse.Namespace) -> int:
     return 0
 
 
+def _start_background(stack: AsyncExitStack, coro: Coroutine[Any, Any, None]) -> None:
+    """Run `coro` as a task until `stack` closes, which cancels it."""
+    task = asyncio.create_task(coro)
+
+    async def stop() -> None:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    stack.push_async_callback(stop)
+
+
 async def _services(config: Config, store: StateStore, stack: AsyncExitStack) -> Services:
     """Build the services. Later tasks start their clients here and register cleanup on `stack`."""
-    return Services(store, config, actions=ActionRunner())
+    services = Services(store, config, actions=ActionRunner())
+    runner = Runner()
+    register_local_actions(services, runner)
+    if config.ddc is not None:
+        services.ddc = Ddc(runner, config.ddc.model, store)
+        _start_background(stack, services.ddc.poll_forever())
+    return services
 
 
 def _run(args: argparse.Namespace) -> int:
