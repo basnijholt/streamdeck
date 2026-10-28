@@ -24,7 +24,8 @@ class DdcError(RuntimeError):
 
 def _failure(result: Result) -> str:
     detail = (result.err.strip() or result.out.strip()).splitlines()
-    return f"ddcutil: {detail[-1] if detail else f'exit {result.rc}'}"
+    line = detail[-1] if detail else f"exit {result.rc}"
+    return line if line.startswith("ddcutil:") else f"ddcutil: {line}"
 
 
 class Ddc:
@@ -34,8 +35,11 @@ class Ddc:
         self._store = store
         self._bus: int | None = None
         self._lock = asyncio.Lock()  # one ddcutil call at a time on the I2C bus
-        self._writes = 0  # counts brightness writes, so `refresh` can tell its read is stale
-        self._sender = Coalescer(self._send)
+        # Numbers the brightness writes handed to the sender and the newest it has dealt with;
+        # while they differ a write is in flight or waiting, so a read may be stale.
+        self._submitted = 0
+        self._finished = 0
+        self._sender = Coalescer[tuple[int, int]](self._send)
 
     async def detect_bus(self) -> int:
         """Find the I2C bus of the monitor whose name contains the model, and remember it."""
@@ -61,50 +65,55 @@ class Ddc:
     def set_brightness(self, value: int) -> None:
         """Show `value` (clamped to 0-100) at once and send it, newest value only."""
         value = max(0, min(100, value))
-        self._wrote(value)
-        self._sender.submit(value)
+        self._store.set("ddc.brightness", value)
+        self._submitted += 1
+        self._sender.submit((self._submitted, value))
 
     async def setvcp(self, code: int, value: int) -> None:
         """Set any VCP feature; raises `DdcError` on failure."""
         await self._run("setvcp", f"{code:x}", str(value))
-        if code == BRIGHTNESS_CODE:
-            self._wrote(value)
+        if code == BRIGHTNESS_CODE and self._sender_idle():  # else the dial's target wins
+            self._store.set("ddc.brightness", value)
 
     async def refresh(self) -> None:
         """Read the brightness into the store; raises `DdcError` if the monitor fails."""
-        writes = self._writes
         value = await self.get_brightness()
-        if writes == self._writes:  # else a newer write is on its way and this read is stale
+        if self._sender_idle():  # else a write is on its way and this read may be stale
             self._store.set("ddc.brightness", value)
             self._store.set("ddc.error", None)
 
     async def poll_forever(self, interval: float = 30) -> None:
-        """Re-read the brightness every `interval` seconds. A failure sets `ddc.error`; the loop goes on."""
+        """Re-read the brightness every `interval` seconds.
+
+        A failure sets `ddc.error`; the loop goes on.
+        """
         while True:
             try:
                 await self.refresh()
             except Exception as exc:
-                message = str(exc) or type(exc).__name__
-                if self._store.get("ddc.error") != message:
-                    if isinstance(exc, DdcError):
-                        log.warning("%s", message)
-                    else:
-                        log.exception("brightness read failed")
-                self._store.set("ddc.error", message)
+                self._fail(exc)
             await asyncio.sleep(interval)
 
-    def _wrote(self, brightness: int) -> None:
-        self._writes += 1
-        self._store.set("ddc.brightness", brightness)
+    def _sender_idle(self) -> bool:
+        return self._finished == self._submitted
 
-    async def _send(self, value: int) -> None:
+    def _fail(self, exc: Exception) -> None:
+        """Show `exc` as `ddc.error`, logging it only when it differs from the one shown."""
+        message = str(exc) or type(exc).__name__
+        if self._store.get("ddc.error") != message:
+            log.error("%s", message, exc_info=None if isinstance(exc, DdcError) else exc)
+        self._store.set("ddc.error", message)
+
+    async def _send(self, write: tuple[int, int]) -> None:
+        number, value = write
         try:
             await self._run("setvcp", f"{BRIGHTNESS_CODE:x}", str(value))
-        except DdcError as exc:
-            log.warning("%s", exc)
-            self._store.set("ddc.error", str(exc))
+        except Exception as exc:
+            self._fail(exc)
         else:
             self._store.set("ddc.error", None)
+        finally:
+            self._finished = number
 
     async def _run(self, verb: str, *args: str) -> Result:
         """Run `ddcutil <verb> <args>` on the monitor's bus.

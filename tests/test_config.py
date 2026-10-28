@@ -127,6 +127,13 @@ def test_ha_action_and_state_need_home_assistant(tmp_path):
     assert any(err.startswith("pages.home.keys.0.press") for err in errs)
 
 
+def test_ddc_action_needs_ddc_section(tmp_path):
+    key = {"press": {"ddc": {"code": 16, "value": 35}}}
+    errs = errors_of(tmp_path, home(key))
+    assert any(err.startswith("pages.home.keys.0.press") and "ddc" in err for err in errs)
+    assert load_config(write(tmp_path, home(key, ddc={"model": "X"}))).ddc is not None
+
+
 def test_t3_action_needs_t3_section(tmp_path):
     errs = errors_of(tmp_path, home({"t3.slot": 2}))
     assert any("t3" in err for err in errs)

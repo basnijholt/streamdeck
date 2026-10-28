@@ -293,6 +293,8 @@ class Config(_Model):
             need(self.mac, "mac", loc, kind)
         elif kind == "ha":
             need(self.home_assistant, "home_assistant", loc, kind)
+        elif kind == "ddc":
+            need(self.ddc, "ddc", loc, kind)
         elif kind.startswith("t3."):
             need(self.t3, "t3", loc, kind)
         elif kind == "page" and action.args not in self.pages:

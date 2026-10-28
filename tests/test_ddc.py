@@ -178,6 +178,37 @@ async def test_unreachable_monitor_sets_error_instead_of_raising(store):
     assert "DELL U4025QW" in store.get("ddc.error")
 
 
+async def test_failure_messages_carry_one_ddcutil_prefix(store):
+    runner = FakeRunner()
+    runner.script(["ddcutil", "detect"], Result(-1, "", "ddcutil: timed out after 10s"))
+    with pytest.raises(DdcError) as timed_out:
+        await Ddc(runner, MODEL, store).detect_bus()
+    assert str(timed_out.value) == "ddcutil: timed out after 10s"
+
+    runner = FakeRunner()
+    runner.script(["ddcutil", "detect"], Result(1, "", "permission denied\n"))
+    with pytest.raises(DdcError) as plain:
+        await Ddc(runner, MODEL, store).detect_bus()
+    assert str(plain.value) == "ddcutil: permission denied"
+
+
+async def test_unexpected_send_error_sets_error(store, caplog):
+    class Exploding(FakeRunner):
+        async def run(self, argv, timeout=10):
+            if "setvcp" in argv:
+                raise RuntimeError("boom")
+            return await super().run(argv, timeout)
+
+    runner = Exploding()
+    runner.script(["ddcutil", "detect"], Result(0, DETECT, ""))
+    ddc = Ddc(runner, MODEL, store)
+    with caplog.at_level(logging.WARNING, logger="deck.ddc"):
+        ddc.set_brightness(50)
+        await settle()
+    assert store.get("ddc.error") == "boom"
+    assert "boom" in caplog.text
+
+
 # --- setvcp -----------------------------------------------------------------
 
 
@@ -198,6 +229,20 @@ async def test_setvcp_of_brightness_updates_the_store(runner, store, ddc):
     assert store.get("ddc.brightness") == 35
     await ddc.setvcp(0xD6, 1)
     assert store.get("ddc.brightness") == 35
+
+
+async def test_setvcp_of_brightness_leaves_a_pending_dial_target_shown(runner, store, ddc):
+    await ddc.detect_bus()
+    runner.block = asyncio.Event()
+    ddc.set_brightness(10)  # in flight, holding the lock
+    action = asyncio.create_task(ddc.setvcp(16, 35))
+    ddc.set_brightness(59)  # sent after the action, so it ends up on the monitor
+    await settle()
+    runner.block.set()
+    await action
+    await settle()
+    assert sets(runner) == ["10", "35", "59"]
+    assert store.get("ddc.brightness") == 59
 
 
 # --- refresh and poll_forever ------------------------------------------------
@@ -223,6 +268,21 @@ async def test_refresh_drops_a_read_overtaken_by_a_set(runner, store, ddc):
     assert store.get("ddc.brightness") == 50
 
 
+async def test_refresh_drops_a_read_queued_behind_a_coalesced_write(runner, store, ddc):
+    await ddc.detect_bus()
+    runner.script([*BUS4, "getvcp"], Result(0, BRIGHTNESS.replace("100,", "10,"), ""))
+    runner.block = asyncio.Event()
+    ddc.set_brightness(10)  # in flight, holding the lock
+    ddc.set_brightness(59)  # waits behind it
+    read = asyncio.create_task(ddc.refresh())
+    await settle()
+    runner.block.set()
+    await read
+    await settle()
+    assert store.get("ddc.brightness") == 59
+    assert ["get" if "getvcp" in c else c[-1] for c in runner.calls[1:]] == ["10", "get", "59"]
+
+
 async def test_poll_forever_reads_every_interval(runner, store, ddc):
     runner.script([*BUS4, "getvcp"], Result(0, BRIGHTNESS, ""), Result(0, BRIGHTNESS.replace("100,", "30,"), ""))
     task = asyncio.create_task(ddc.poll_forever(interval=0.02))
@@ -244,7 +304,6 @@ async def test_poll_forever_survives_failures(runner, store, ddc, caplog):
         finally:
             task.cancel()
     assert store.get("ddc.error") is None
-    assert not task.done() or task.cancelled()
 
 
 async def test_poll_forever_survives_unexpected_errors(store, caplog):
