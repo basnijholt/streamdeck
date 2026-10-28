@@ -18,7 +18,7 @@
 - Package/import name `deck`; console script `deck`; source in `src/deck/`, tests in `tests/`.
 - Device geometry: 36 keys (9 cols × 4 rows), key image 112×112; 6 dials; touch strip 1200×100 split into six 200×100 segments; strip images are JPEG.
 - Long press = key held ≥ 0.5 s, fired on release.
-- Mac transport: `ssh -T -o BatchMode=yes -o ServerAliveInterval=10 -i <key> <host> deck remote`; JSON Lines; request timeout 15 s; reconnect backoff 1 s doubling to 30 s; while offline `mac.*` presses are dropped, not queued.
+- Mac transport: `ssh -T -o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=3 -o ServerAliveCountMax=2 -i <key> <host> deck remote`; JSON Lines; request timeout 15 s; reconnect backoff 1 s doubling to 30 s; while offline `mac.*` presses are dropped, not queued.
 - Mac state poll every 1 s; send only changes; full snapshot on connect.
 - Bluetooth connect wait ≤ 10 s, polling every 0.5 s.
 - DDC: `ddcutil --bus <N> --skip-ddc-checks --sleep-multiplier 0.3 getvcp|setvcp 10 …`; bus found once via `ddcutil detect --brief` matching `ddc.model`; brightness re-read every 30 s; presets default `[35, 80]`.
