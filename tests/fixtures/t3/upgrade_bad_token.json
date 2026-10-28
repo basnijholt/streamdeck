@@ -1,0 +1,4 @@
+{
+ "status": 401,
+ "body": "{\"_tag\":\"EnvironmentAuthInvalidError\",\"code\":\"auth_invalid\",\"reason\":\"invalid_credential\",\"traceId\":\"53dd4c906ad0735e68405ee28ff0b15a\"}"
+}

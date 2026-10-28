@@ -1,0 +1,94 @@
+{
+ "_tag": "Chunk",
+ "requestId": "1",
+ "values": [
+  {
+   "kind": "thread.updated",
+   "sequence": 906703,
+   "location": "active",
+   "thread": {
+    "createdBy": "user",
+    "creationSource": "web",
+    "id": "1cca8a80-c3a4-48a5-bfe0-87c810cb2f91",
+    "projectId": "6046f0c3-9e68-46fc-bcd2-974c52d24cd3",
+    "title": "Thread 27",
+    "providerInstanceId": "claudeAgent",
+    "modelSelection": {
+     "instanceId": "claudeAgent",
+     "model": "claude-opus-5-5",
+     "options": [
+      {
+       "id": "effort",
+       "value": "xhigh"
+      },
+      {
+       "id": "fastMode",
+       "value": false
+      }
+     ]
+    },
+    "runtimeMode": "full-access",
+    "interactionMode": "default",
+    "branch": "main",
+    "worktreePath": null,
+    "linkedPullRequest": null,
+    "pullRequests": [],
+    "lineage": {
+     "parentThreadId": null,
+     "relationshipToParent": null,
+     "rootThreadId": "1cca8a80-c3a4-48a5-bfe0-87c810cb2f91"
+    },
+    "forkedFrom": null,
+    "activeProviderThreadId": "provider-thread:provider:claudeAgent:native-thread:pending%3Arun%3Athread%3A1cca8a80-c3a4-48a5-bfe0-87c810cb2f91%3Aordinal%3A1",
+    "latestRunId": "run:thread:1cca8a80-c3a4-48a5-bfe0-87c810cb2f91:ordinal:20",
+    "latestRunRequestedAt": "2026-10-28T04:31:56.689Z",
+    "latestRunStartedAt": "2026-10-28T04:33:08.269Z",
+    "latestRunCompletedAt": "2026-10-28T04:38:35.231Z",
+    "latestRunStopRequested": false,
+    "activeRunId": null,
+    "activityRunStartedAt": null,
+    "activityRunStatus": null,
+    "blockedOnThreadWait": false,
+    "status": "completed",
+    "lastError": null,
+    "lastErrorClass": null,
+    "lastErrorCode": null,
+    "usageLimitResetAt": null,
+    "pendingRuntimeRequest": null,
+    "pendingGuestMessageCount": 0,
+    "latestVisibleMessage": null,
+    "latestUserMessageAt": "2026-10-28T04:31:56.689Z",
+    "latestUserAuthoredMessageAt": "2026-10-28T04:31:56.689Z",
+    "hasActionableProposedPlan": false,
+    "pendingBackgroundTasks": [],
+    "providerInstanceHistory": [
+     "claudeAgent"
+    ],
+    "goal": null,
+    "itemCount": 507,
+    "visibleItemCount": 507,
+    "createdAt": "2026-10-27T22:24:51.030Z",
+    "updatedAt": "2026-10-28T19:23:47.992Z",
+    "archivedAt": null,
+    "settledOverride": "settled",
+    "settledAt": "2026-10-28T05:13:40.204Z",
+    "unsettledAt": null,
+    "snoozedUntil": null,
+    "snoozedAt": null,
+    "limitRecovery": null,
+    "pinnedAt": null,
+    "autoSettleDisabledAt": null,
+    "pinOrderKey": null,
+    "activeOrderKey": null,
+    "lastVisitedAt": "2026-10-28T05:08:35.126Z",
+    "opens": {
+     "openedAt": 1793162807182,
+     "score": 5.960710429142008,
+     "picks": []
+    },
+    "titleRegeneration": null,
+    "deletedAt": null
+   }
+  }
+ ]
+}

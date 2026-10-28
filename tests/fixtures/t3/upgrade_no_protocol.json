@@ -1,0 +1,4 @@
+{
+ "status": 426,
+ "body": "{\"code\":\"orchestration_protocol_incompatible\",\"message\":\"Update this client to one that supports orchestration protocol 2.\",\"orchestrationProtocolVersion\":2}"
+}

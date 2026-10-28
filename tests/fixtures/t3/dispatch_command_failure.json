@@ -1,0 +1,27 @@
+{
+ "_tag": "Exit",
+ "requestId": "2",
+ "exit": {
+  "_tag": "Failure",
+  "cause": [
+   {
+    "_tag": "Fail",
+    "error": {
+     "_tag": "OrchestrationV2DispatchCommandError",
+     "commandId": "streamdeck-spike-unknown-1",
+     "commandType": "thread.model-selection.set",
+     "message": "No orchestration projection exists for thread 00000000-0000-4000-8000-000000000000.",
+     "detail": "No orchestration projection exists for thread 00000000-0000-4000-8000-000000000000.",
+     "cause": {
+      "name": "OrchestratorProjectionError",
+      "message": "Failed to load orchestration projection for thread 00000000-0000-4000-8000-000000000000.",
+      "cause": {
+       "name": "ProjectionStoreThreadNotFoundError",
+       "message": "No orchestration projection exists for thread 00000000-0000-4000-8000-000000000000."
+      }
+     }
+    }
+   }
+  ]
+ }
+}

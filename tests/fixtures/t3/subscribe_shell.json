@@ -1,0 +1,10 @@
+{
+ "_tag": "Request",
+ "id": "1",
+ "tag": "orchestration.subscribeShell",
+ "payload": {
+  "omitIdleSubagents": true,
+  "omitOlderSettled": true
+ },
+ "headers": []
+}
