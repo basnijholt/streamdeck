@@ -247,6 +247,7 @@ t3:
   models:
     claudeAgent: [claude-opus-5-5, claude-sonnet-5-5, claude-haiku-5-5]
   efforts: [low, medium, high, xhigh, max]
+  effort_options: {codex: reasoningEffort}  # effort option id per instance; default "effort"
 ddc:
   model: DELL U4025QW
 audio:

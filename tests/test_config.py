@@ -125,6 +125,17 @@ def test_home_assistant_and_t3_urls_accept_http_and_https(tmp_path):
     assert cfg.t3.servers[0].web_url == "https://t3.example/x"
 
 
+def test_t3_effort_options_default_to_codex_reasoning_effort(tmp_path):
+    cfg = load_config(write(tmp_path, home(t3=t3_section(T3_SERVER))))
+    assert cfg.t3.effort_options == {"codex": "reasoningEffort"}
+
+
+def test_t3_effort_options_can_be_replaced(tmp_path):
+    section = {**t3_section(T3_SERVER), "effort_options": {"codex": "effort", "other": "depth"}}
+    cfg = load_config(write(tmp_path, home(t3=section)))
+    assert cfg.t3.effort_options == {"codex": "effort", "other": "depth"}
+
+
 def test_duplicate_t3_server_names_rejected(tmp_path):
     other = {**T3_SERVER, "name": "laptop"}
     again = {**T3_SERVER, "url": "http://127.0.0.1:3774"}

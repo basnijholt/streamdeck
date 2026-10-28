@@ -196,6 +196,9 @@ class T3Config(_Model):
     servers: list[T3Server]
     models: dict[str, list[str]]
     efforts: list[str] = ["low", "medium", "high", "xhigh", "max"]
+    # Provider instance id -> id of the model option holding its reasoning effort; an
+    # instance not listed uses "effort".
+    effort_options: dict[str, str] = {"codex": "reasoningEffort"}
 
 
 class DDCConfig(_Model):

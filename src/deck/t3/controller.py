@@ -413,8 +413,12 @@ class EffortDial(_ThreadDial):
 
     kind = "effort"
 
+    def _option_id(self, instance_id: str) -> str:
+        """The id of the option holding the effort of threads on provider instance `instance_id`."""
+        return self._ctl.cfg.effort_options.get(instance_id, "effort")
+
     def _current(self, thread: Thread) -> str | None:
-        value = dict(thread.options).get("effort")
+        value = dict(thread.options).get(self._option_id(thread.instance_id))
         return None if value is None else str(value)
 
     def _choices(self, thread: Thread) -> list[str]:
@@ -424,9 +428,10 @@ class EffortDial(_ThreadDial):
         return f"effort n/a for {instance_id}"
 
     def _with_value(self, selection: ModelSelection, value: str) -> ModelSelection | None:
-        if not any(key == "effort" for key, _ in selection.options):
+        option_id = self._option_id(selection.instance_id)
+        if not any(key == option_id for key, _ in selection.options):
             return None
-        options = tuple((key, value if key == "effort" else old) for key, old in selection.options)
+        options = tuple((key, value if key == option_id else old) for key, old in selection.options)
         return ModelSelection(selection.instance_id, selection.model, options)
 
 

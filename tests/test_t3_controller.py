@@ -443,11 +443,68 @@ async def test_effort_unknown_current_value_is_entered_from_the_end_turned_away_
 
 
 async def test_effort_not_offered_by_the_provider_shows_n_a(ctrl, mac, source, store, effort):
-    mac.active_urls = [url_of(CODEX_THREAD), url_of(CODEX_THREAD)]
+    no_effort = replace(CODEX_THREAD, options=())
+    store.set("t3.threads.pc", [no_effort])
+    mac.active_urls = [url_of(no_effort), url_of(no_effort)]
     await effort.on_turn(+1)
     assert pending(store) == "effort n/a for codex"
     await effort.on_press()  # nothing was captured
     assert source.calls == [] and mac.reads == 1
+
+
+async def test_effort_dial_reads_and_sets_codex_reasoning_effort(ctrl, mac, source, store, effort):
+    source.selections[CODEX_THREAD.thread_id] = ModelSelection(
+        "codex", "gpt-5", (("reasoningEffort", "high"), ("x", 1))
+    )
+    mac.active_urls = [url_of(CODEX_THREAD), url_of(CODEX_THREAD)]
+    await effort.on_turn(+1)
+    assert pending(store) == Pending("Codex one", "high", "xhigh")
+    await effort.on_press()
+    assert source.calls == [
+        (
+            CODEX_THREAD.thread_id,
+            ModelSelection("codex", "gpt-5", (("reasoningEffort", "xhigh"), ("x", 1))),
+        )
+    ]
+
+
+async def test_plain_effort_option_is_not_the_codex_one(ctrl, mac, source, store, effort):
+    # codex threads carry `reasoningEffort`; an `effort` option there is another setting
+    odd = replace(CODEX_THREAD, options=(("effort", "high"),))
+    store.set("t3.threads.pc", [odd])
+    mac.active_urls = [url_of(odd)]
+    await effort.on_turn(+1)
+    assert pending(store) == "effort n/a for codex"
+
+
+async def test_claude_thread_with_only_reasoning_effort_shows_n_a(ctrl, mac, store, effort):
+    odd = replace(T1, options=(("reasoningEffort", "high"),))
+    store.set("t3.threads.pc", [odd])
+    mac.active_urls = [url_of(odd)]
+    await effort.on_turn(+1)
+    assert pending(store) == "effort n/a for claudeAgent"
+
+
+async def test_effort_option_id_follows_the_configured_instance_map(store, source, mac, time):
+    cfg = T3Config(
+        servers=[SERVER],
+        models={},
+        efforts=EFFORTS,
+        effort_options={"claudeAgent": "thinking"},
+    )
+    custom = replace(T1, options=(("thinking", "low"), ("fastMode", False)))
+    source.selections[T1.thread_id] = selection(custom)
+    store.set("t3.threads.pc", [custom])
+    controller = T3Controller(store, {"pc": source}, cfg, mac, clock=time.clock, sleep=time.sleep)
+    try:
+        dial = EffortDial(controller)
+        mac.active_urls = [url_of(custom), url_of(custom)]
+        await dial.on_turn(+1)
+        assert pending(store) == Pending("First", "low", "medium")
+        await dial.on_press()
+        assert source.calls == [(T1.thread_id, selection(custom, thinking="medium"))]
+    finally:
+        await controller.aclose()
 
 
 async def test_effort_n_a_when_the_server_selection_lost_its_effort_option(
