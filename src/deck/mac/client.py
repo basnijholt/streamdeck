@@ -7,17 +7,16 @@ While offline, `request` raises `MacOffline` at once: presses are dropped, never
 """
 
 import asyncio
-import contextlib
 import itertools
 import json
 import logging
-from asyncio.subprocess import PIPE, Process
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from pydantic import BaseModel
 
 from deck.config import Action, AudioConfig, MacConfig
+from deck.proc import forward_stderr, spawn, stop
 from deck.state import StateStore
 
 log = logging.getLogger(__name__)
@@ -26,10 +25,6 @@ REQUEST_TIMEOUT = 15  # seconds; a Bluetooth connect is the slow path
 BACKOFF_START = 1.0  # seconds before the first reconnect
 BACKOFF_MAX = 30.0
 STDOUT_LIMIT = 16 << 20  # state lines can be big
-TERMINATE_GRACE = 2.0  # seconds a terminated child has to exit before it is killed
-STDERR_GRACE = 1.0  # seconds to let the last of the child's stderr through
-SPAWN_GRACE = 1.0  # seconds a spawn cancelled halfway has to finish before it is cancelled again
-MAX_LOG_LINE = 4096  # characters of a stderr line that are logged
 
 AudioSource = AudioConfig | None | Callable[[], AudioConfig | None]
 
@@ -130,42 +125,16 @@ class MacClient:
     # --- one connection -------------------------------------------------------
 
     async def _session(self) -> None:
-        proc = await self._spawn()
+        proc = await spawn(self.argv(), STDOUT_LIMIT)
         assert proc.stdin and proc.stdout and proc.stderr  # all three are PIPEs
-        stderr_task = asyncio.create_task(_forward_stderr(proc.stderr))
+        stderr_task = asyncio.create_task(forward_stderr(proc.stderr, "Mac"))
         try:
             proc.stdin.write(self._hello())
             await proc.stdin.drain()
             await self._read(proc.stdin, proc.stdout)
         finally:
             self._go_offline()
-            await _stop(proc, stderr_task)
-
-    async def _spawn(self) -> Process:
-        """Start the child, without letting a cancellation hit asyncio's spawn halfway.
-
-        A spawn cancelled before its pipes are connected waits forever for them to close, which
-        would hang the shutdown. So the spawn runs as its own task; when this one is cancelled
-        it is given a moment to finish, its child is stopped, and only a spawn that still hangs
-        is cancelled (that second cancel is what unblocks it).
-        """
-        spawn = asyncio.ensure_future(
-            asyncio.create_subprocess_exec(
-                *self.argv(), stdin=PIPE, stdout=PIPE, stderr=PIPE, limit=STDOUT_LIMIT
-            )
-        )
-        try:
-            return await asyncio.shield(spawn)
-        except asyncio.CancelledError:
-            # Whatever happens from here, even a second cancel, a child that appears must die.
-            spawn.add_done_callback(_kill_spawned)
-            _, unfinished = await asyncio.wait({spawn}, timeout=SPAWN_GRACE)
-            for task in unfinished:
-                task.cancel()
-            (outcome,) = await asyncio.gather(spawn, return_exceptions=True)
-            if isinstance(outcome, Process):
-                await _stop(outcome, None)
-            raise
+            await stop(proc, stderr_task)
 
     def _hello(self) -> bytes:
         audio = self._audio() if callable(self._audio) else self._audio
@@ -218,67 +187,6 @@ class MacClient:
 
 def _encode(message: dict[str, Any]) -> bytes:
     return json.dumps(message, allow_nan=False).encode() + b"\n"
-
-
-async def _forward_stderr(stream: asyncio.StreamReader) -> None:
-    """Log the child's stderr line by line, so the pipe never fills up and blocks it.
-
-    `deck remote` logs there, and ssh reports its own failures there (a refused connection,
-    a rejected key).
-    """
-    pending = b""
-    while chunk := await stream.read(1 << 16):
-        *lines, pending = (pending + chunk).split(b"\n")
-        pending = pending[-MAX_LOG_LINE:]  # a line without a newline stays bounded
-        for line in lines:
-            _log_stderr(line)
-    _log_stderr(pending)
-
-
-def _log_stderr(line: bytes) -> None:
-    text = line.decode(errors="replace").strip()
-    if text:
-        log.warning("Mac: %s", text[:MAX_LOG_LINE])
-
-
-def _kill_spawned(spawn: asyncio.Future[Process]) -> None:
-    """Done-callback of a spawn nobody is waiting for any more: its child must not live on."""
-    if spawn.cancelled() or spawn.exception() is not None:
-        return
-    proc = spawn.result()
-    with contextlib.suppress(ProcessLookupError):
-        proc.kill()
-    if proc.stdin is not None:
-        proc.stdin.close()
-
-
-async def _stop(proc: Process, stderr_task: asyncio.Task[None] | None) -> None:
-    """Close the child's stdin, terminate it, kill it if it lingers: no process is left behind."""
-    assert proc.stdin
-    proc.stdin.close()
-    try:
-        await _end(proc)
-    finally:  # also when cancelled again while waiting
-        if stderr_task is not None:
-            try:
-                await asyncio.wait({stderr_task}, timeout=STDERR_GRACE)
-            finally:
-                stderr_task.cancel()
-            await asyncio.gather(stderr_task, return_exceptions=True)
-
-
-async def _end(proc: Process) -> None:
-    try:
-        if proc.returncode is None:
-            with contextlib.suppress(ProcessLookupError):
-                proc.terminate()
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(proc.wait(), TERMINATE_GRACE)
-    finally:  # also when cancelled again while waiting
-        if proc.returncode is None:
-            with contextlib.suppress(ProcessLookupError):
-                proc.kill()
-            await proc.wait()
 
 
 # --- actions ----------------------------------------------------------------

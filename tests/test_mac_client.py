@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from deck import cli
+from deck import proc as proc_module
 from deck.actions import ActionRunner
 from deck.config import (
     Action,
@@ -22,7 +23,6 @@ from deck.config import (
     OutputArgs,
 )
 from deck.dials import DIAL_FACTORIES, Services
-from deck.mac import client as client_module
 from deck.mac.client import MacClient, MacError, MacOffline, handle_mac_action
 from deck.mac.dials import InputDial, VolumeDial
 from deck.state import StateStore
@@ -372,7 +372,7 @@ async def test_a_second_cancel_while_the_child_starts_still_leaves_no_child(
 
 
 async def test_a_child_that_ignores_sigterm_is_killed(monkeypatch, state_file, store, fake_sleep):
-    monkeypatch.setattr(client_module, "TERMINATE_GRACE", 0.2)
+    monkeypatch.setattr(proc_module, "TERMINATE_GRACE", 0.2)
     cfg = mac_config(stub_command(state_file, "--stubborn"))
     client = MacClient(cfg, None, store, sleep=fake_sleep)
     async with running(client):
