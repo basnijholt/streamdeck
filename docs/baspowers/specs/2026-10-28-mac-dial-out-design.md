@@ -155,6 +155,7 @@ command="/home/basnijholt/.local/bin/deck attach mini",restrict,from="192.168.1.
 | Bad or missing attach line | connection closed, warning logged |
 | Same name connects twice | the newer session wins, the older is closed |
 | `ioreg` fails | `idle` left out; the Mac keeps its last `last_input` |
+| Mac sleeps or the network drops without closing the connection | a session that has sent nothing for 5 s is closed (with `idle`, every Mac sends a diff each second), as if the Mac dropped |
 
 ## 7. Testing
 
