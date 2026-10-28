@@ -78,13 +78,15 @@ state diffs, requests and replies.
   logged-in user. Automation prompts name the deck's Python; accept once.
 - `deck remote` and `serve_stdio` are removed: nothing runs them any more.
 
-### 4.2 Mac poller: `idle`
+### 4.2 Mac poller: `idle_ms`
 
-`MacPoller.snapshot()` gains `idle`: seconds since the last keyboard or
-mouse input, an integer, read from
-`ioreg -c IOHIDSystem -d 4 -r -k HIDIdleTime` (nanoseconds). It changes on
-every poll, so each Mac sends one small diff per second. A failed or
-unparseable read leaves `idle` out.
+`MacPoller.snapshot()` gains `idle_ms`: milliseconds since the last
+keyboard or mouse input, an integer, read from
+`ioreg -c IOHIDSystem -d 4 -r -k HIDIdleTime` (nanoseconds). Milliseconds,
+not seconds: whole seconds stay at 0 while the user types, so the diff-only
+push would go quiet. In milliseconds the value differs on every poll, so each
+Mac sends one small diff per second, which doubles as its heartbeat. A failed
+or unparseable read leaves `idle_ms` out.
 
 ### 4.3 PC: `deck attach NAME`
 
@@ -106,8 +108,9 @@ unparseable read leaves `idle` out.
   request ids and futures, 15 s request timeout, every pending request fails
   with `MacOffline` when the session ends. It also keeps the Mac's full state
   (snapshot merged with diffs) and `last_input`.
-- `last_input`: the PC's monotonic clock minus `idle`, updated by each state
-  message that carries `idle`; the connect time until the first one.
+- `last_input`: the PC's monotonic clock minus `idle_ms / 1000`, updated by
+  each state message that carries `idle_ms`; the connect time until the first
+  one.
 - **Active Mac:** the online session with the greatest `last_input`,
   recomputed on every state message, connect and disconnect.
 - **Store:** `mac.*` mirrors the active session with today's keys, so views,
@@ -154,21 +157,21 @@ command="/home/basnijholt/.local/bin/deck attach mini",restrict,from="192.168.1.
 | A Mac drops | its session ends, its pending requests fail with `MacOffline`, the next most recent Mac becomes active, or `mac.online` goes false |
 | Bad or missing attach line | connection closed, warning logged |
 | Same name connects twice | the newer session wins, the older is closed |
-| `ioreg` fails | `idle` left out; the Mac keeps its last `last_input` |
-| Mac sleeps or the network drops without closing the connection | a session that has sent nothing for 5 s is closed (with `idle`, every Mac sends a diff each second), as if the Mac dropped |
+| `ioreg` fails | `idle_ms` left out; the Mac keeps its last `last_input` |
+| Mac sleeps or the network drops without closing the connection | a session that has sent `idle_ms` at least once and then nothing for 5 s is closed, as if the Mac dropped (a Mac without `idle_ms` has no heartbeat and is never closed for silence) |
 
 ## 7. Testing
 
 - `MacSession` and `MacHub` against in-process fake Macs: `serve()` with fake
   executor and poller, connected to a real hub socket in a temp dir.
-- Active selection: two fake Macs; `idle` updates move the active Mac;
+- Active selection: two fake Macs; `idle_ms` updates move the active Mac;
   disconnecting the active one falls back; no Mac means offline; a request in
   flight fails when its Mac drops while another stays online.
 - `deck attach` end to end: hub socket, `deck attach` as a subprocess, the
   existing `tests/stub_remote.py` on its stdio.
 - `deck connect` with the ssh argv swapped for a local command that runs
   `deck attach`, so the whole chain runs without ssh.
-- `idle` parsing from `ioreg` output, including failure.
+- `idle_ms` parsing from `ioreg` output, including failure.
 - The existing Mac client tests move to the hub where they still apply.
 
 ## 8. Setup

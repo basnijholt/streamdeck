@@ -19,8 +19,8 @@
 - Reconnect backoff 1 s doubling to 30 s, reset after a session in which the `hello` arrived.
 - Hub socket `$XDG_RUNTIME_DIR/deck-mac.sock` (else `/tmp/deck-mac-<uid>.sock`), mode 0600, stale socket file replaced.
 - Attach line `{"attach": "<name>"}`, name `^[A-Za-z0-9_-]{1,32}$`, read within 5 s, at most 1 KiB.
-- Request timeout 15 s. A session silent for 5 s is closed.
-- `idle` = integer seconds from `ioreg -c IOHIDSystem -d 4 -r -k HIDIdleTime` (nanoseconds).
+- Request timeout 15 s. A session that has sent `idle_ms` at least once and then nothing for 5 s is closed.
+- `idle_ms` = integer milliseconds from `ioreg -c IOHIDSystem -d 4 -r -k HIDIdleTime` (nanoseconds). (Ruling: was `idle` in seconds.)
 - Store: `mac.*` mirrors the active Mac with today's keys, plus `mac.active` (name) and `mac.connected` (sorted names); no Mac online means `mac.online` false.
 - The JSON Lines protocol, `ALLOWED_KINDS`, views, dials and actions do not change.
 - Commit messages in normal English, conventional prefix (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`).
