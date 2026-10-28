@@ -5,13 +5,13 @@ from collections.abc import AsyncIterator
 
 from PIL import Image
 
-from deck.device import Device
+from deck.device import DIAL_COUNT, KEY_COUNT, Device
 from deck.events import Event
 
 
 class FakeDeck(Device):
-    key_count = 36
-    dial_count = 6
+    key_count = KEY_COUNT
+    dial_count = DIAL_COUNT
 
     def __init__(self) -> None:
         self.keys: dict[int, Image.Image] = {}

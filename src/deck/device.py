@@ -180,6 +180,8 @@ class StreamDeckDevice(Device):
                         yield event
                 finally:
                     self._detach(deck)
+                # Events still queued are discarded, so consumers must reset
+                # their pressed-key state when they see Disconnected().
                 log.warning("deck disconnected")
                 yield Disconnected()
             await self._sleep(delay)

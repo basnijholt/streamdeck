@@ -47,7 +47,10 @@ class Connected:
 
 @dataclass(frozen=True)
 class Disconnected:
-    pass
+    """The deck is gone; events still queued at that moment were discarded.
+
+    Consumers must reset pressed-key state (a KeyUp may never arrive).
+    """
 
 
 Event = (

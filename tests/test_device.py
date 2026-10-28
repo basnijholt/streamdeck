@@ -11,11 +11,13 @@ from PIL import Image
 from StreamDeck.Devices.StreamDeck import DialEventType, TouchscreenEventType
 from StreamDeck.Transport.Transport import TransportError
 
+from deck import device as device_module
 from deck.device import (
     Device,
     StreamDeckDevice,
     dial_event,
     key_event,
+    open_first_deck,
     touch_event,
 )
 from deck.events import (
@@ -150,13 +152,19 @@ def test_events_are_frozen_values():
 # --- FakeDeck -------------------------------------------------------------
 
 
-def test_fake_deck_satisfies_device_protocol():
-    assert isinstance(FakeDeck(), Device)
+@pytest.mark.parametrize("cls", [FakeDeck, StreamDeckDevice])
+def test_implementations_override_every_device_member(cls):
+    # Both classes subclass the Protocol, so isinstance alone would pass even
+    # with a member missing (the inherited `...` body); check they define each one.
+    for name in ("set_key", "set_segment", "set_brightness", "events"):
+        assert name in vars(cls), f"{cls.__name__} does not implement {name}"
+    assert cls.key_count == 36
+    assert cls.dial_count == 6
+    assert isinstance(cls.__new__(cls), Device)
+
+
+def test_device_protocol_rejects_objects_without_the_members():
     assert not isinstance(object(), Device)
-
-
-def test_stream_deck_device_satisfies_device_protocol():
-    assert isinstance(StreamDeckDevice(), Device)
 
 
 async def test_fake_deck_records_pushes_and_replays_injected_events():
@@ -175,6 +183,85 @@ async def test_fake_deck_records_pushes_and_replays_injected_events():
     assert await next_event(stream) == KeyDown(1)
     assert await next_event(stream) == KeyUp(1)
     await stream.aclose()
+
+
+# --- open_first_deck --------------------------------------------------------
+
+
+class ListedDeck:
+    """A library deck as returned by `DeviceManager.enumerate()`."""
+
+    def __init__(self, deck_type: str = "Stream Deck + XL", serial: str = "A1") -> None:
+        self._type = deck_type
+        self.serial = serial
+        self.opened = False
+        self.closed = False
+
+    def deck_type(self) -> str:
+        return self._type
+
+    def open(self) -> None:
+        self.opened = True
+
+    def close(self) -> None:
+        self.closed = True
+
+    def get_serial_number(self) -> str:
+        assert self.opened, "serial can only be read from an open deck"
+        return self.serial
+
+
+@pytest.fixture
+def attach(monkeypatch):
+    """Make `open_first_deck` see exactly these decks (no libhidapi involved)."""
+
+    def attach(*decks: ListedDeck) -> None:
+        class StubManager:
+            def enumerate(self) -> list[ListedDeck]:
+                return list(decks)
+
+        monkeypatch.setattr(device_module, "DeviceManager", StubManager)
+
+    return attach
+
+
+def test_open_first_deck_without_serial_opens_the_first_xl(attach):
+    first, second = ListedDeck(serial="A1"), ListedDeck(serial="B2")
+    attach(first, second)
+    assert open_first_deck() is first
+    assert first.opened
+    assert not second.opened
+
+
+def test_open_first_deck_skips_other_deck_models(attach):
+    other, xl = ListedDeck("Stream Deck +"), ListedDeck()
+    attach(other, xl)
+    assert open_first_deck() is xl
+    assert not other.opened
+
+
+def test_open_first_deck_with_serial_closes_the_others_and_returns_the_match(attach):
+    wrong, right = ListedDeck(serial="A1"), ListedDeck(serial="B2")
+    attach(wrong, right)
+    assert open_first_deck("B2") is right
+    assert wrong.closed
+    assert not right.closed
+
+
+def test_open_first_deck_raises_when_nothing_matches(attach):
+    attach(ListedDeck("Stream Deck +"))
+    with pytest.raises(TransportError, match=r"^no Stream Deck \+ XL found$"):
+        open_first_deck()
+
+
+def test_open_first_deck_raises_when_no_serial_matches(attach):
+    deck = ListedDeck(serial="A1")
+    attach(deck)
+    with pytest.raises(
+        TransportError, match=r"^no Stream Deck \+ XL found with serial Z9$"
+    ):
+        open_first_deck("Z9")
+    assert deck.closed
 
 
 # --- callback translation -------------------------------------------------
