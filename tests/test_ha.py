@@ -3,6 +3,7 @@ import contextlib
 import json
 import logging
 import threading
+from collections.abc import Awaitable, Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
@@ -15,8 +16,15 @@ from deck import ha as ha_module
 from deck.actions import ActionRunner
 from deck.config import Action, Config, DialSpec, HAConfig
 from deck.dials import DIAL_FACTORIES, Services
-from deck.ha import HaBrightnessDial, HomeAssistant, entities_in
+from deck.ha import (
+    HaBrightnessDial,
+    HomeAssistant,
+    _brightness_pct,
+    _with_brightness,
+    entities_in,
+)
 from deck.state import StateStore
+from deck.views import segment_view
 
 GUEST = "light.guest_room"
 HA_CONFIG = {"url": "http://ha.local:8123", "token_env": "HA_TOKEN"}
@@ -79,6 +87,11 @@ class WsStub:
         self.received: list[dict[str, Any]] = []
         self.connections = 0
         self.clients: set[Any] = set()
+        self.subscribed: set[Any] = set()  # events go to these only
+        # Awaited when the command arrives, before it is handled: a way to change a state at
+        # exactly that point of the handshake.
+        self.before_subscribe: Callable[[], Awaitable[None]] | None = None
+        self.before_get_states: Callable[[], Awaitable[None]] | None = None
         self.url = ""
         self._server: Any = None
 
@@ -105,6 +118,14 @@ class WsStub:
             async for raw in ws:
                 message = json.loads(raw)
                 self.received.append(message)
+                hook = {
+                    "subscribe_events": self.before_subscribe,
+                    "get_states": self.before_get_states,
+                }.get(message["type"])
+                if hook is not None:
+                    await hook()
+                if message["type"] == "subscribe_events":
+                    self.subscribed.add(ws)
                 failed = message["type"] == "get_states" and self.fail_get_states
                 reply: dict[str, Any] = {
                     "id": message["id"],
@@ -120,16 +141,23 @@ class WsStub:
             pass
         finally:
             self.clients.discard(ws)
+            self.subscribed.discard(ws)
+
+    async def set_state(self, entity: dict[str, Any]) -> None:
+        """Change an entity in Home Assistant's state machine, and tell the subscribers."""
+        self.states = [e for e in self.states if e["entity_id"] != entity["entity_id"]]
+        self.states.append(entity)
+        await self.push(entity["entity_id"], entity)
 
     async def push(self, entity_id: str, new_state: dict[str, Any] | None) -> None:
         event = {
             "event_type": "state_changed",
             "data": {"entity_id": entity_id, "new_state": new_state},
         }
-        await self.push_raw(json.dumps({"id": 2, "type": "event", "event": event}))
+        await self.push_raw(json.dumps({"id": 1, "type": "event", "event": event}))
 
     async def push_raw(self, text: str) -> None:
-        for ws in list(self.clients):
+        for ws in list(self.subscribed):
             await ws.send(text)
 
     async def drop(self) -> None:
@@ -333,9 +361,43 @@ async def test_the_protocol_sequence(ws_stub, store):
         await eventually(lambda: store.get("ha.online") is True)
     assert ws_stub.received == [
         {"type": "auth", "access_token": "T"},
-        {"id": 1, "type": "get_states"},
-        {"id": 2, "type": "subscribe_events", "event_type": "state_changed"},
+        {"id": 1, "type": "subscribe_events", "event_type": "state_changed"},
+        {"id": 2, "type": "get_states"},
     ]
+
+
+@pytest.mark.parametrize("hook", ["before_subscribe", "before_get_states"])
+async def test_a_change_during_the_handshake_is_not_lost(ws_stub, store, hook):
+    ws_stub.states = [light(GUEST, "on", brightness=128)]
+
+    async def turn_off() -> None:
+        await ws_stub.set_state(light(GUEST, "off"))
+
+    # Before the subscription is live the change is in the snapshot taken after it; between the
+    # subscription and the snapshot the event arrives first and the snapshot has it too.
+    setattr(ws_stub, hook, turn_off)
+    async with running(make_ha(ws_stub.url, store, {GUEST})):
+        await eventually(lambda: store.get("ha.online") is True)
+        assert store.get(f"ha.{GUEST}") == stored("off")
+        await ws_stub.push(GUEST, light(GUEST, "on", brightness=51))  # and events go on after
+        await eventually(lambda: store.get(f"ha.{GUEST}") == stored("on", brightness=51))
+
+
+async def test_the_store_keeps_the_last_states_while_a_reconnect_fetches_new_ones(ws_stub, store):
+    ws_stub.states = [light(GUEST, "on"), light("light.desk", "off")]
+    async with running(make_ha(ws_stub.url, store, {GUEST, "light.desk"}, sleep=FakeSleep())):
+        await eventually(lambda: store.get("ha.online") is True)
+        seen: list[Any] = []
+        store.subscribe(lambda keys: seen.append(store.get("ha.light.desk")))
+
+        async def turn_off() -> None:
+            await ws_stub.set_state(light(GUEST, "off"))
+
+        ws_stub.before_get_states = turn_off  # an event reaches the client before the snapshot
+        await ws_stub.drop()
+        await eventually(lambda: store.get(f"ha.{GUEST}") == stored("off"))
+        await eventually(lambda: store.get("ha.online") is True)
+    assert seen and None not in seen  # the desk light was never dropped on the way
 
 
 async def test_a_removed_entity_is_dropped_from_the_store(ws_stub, store):
@@ -374,10 +436,10 @@ async def test_garbage_messages_are_ignored(ws_stub, store, caplog):
             await eventually(lambda: store.get("ha.online") is True)
             await ws_stub.push_raw("not json")
             await ws_stub.push_raw("[1, 2]")
-            await ws_stub.push_raw(json.dumps({"id": 2, "type": "event", "event": {"data": []}}))
-            await ws_stub.push_raw(json.dumps({"id": 2, "type": "event", "event": None}))
+            await ws_stub.push_raw(json.dumps({"id": 1, "type": "event", "event": {"data": []}}))
+            await ws_stub.push_raw(json.dumps({"id": 1, "type": "event", "event": None}))
             await ws_stub.push_raw(
-                json.dumps({"id": 2, "type": "event", "event": {"data": {"new_state": {}}}})
+                json.dumps({"id": 1, "type": "event", "event": {"data": {"new_state": {}}}})
             )
             await ws_stub.push(GUEST, light(GUEST, "off"))
             await eventually(lambda: store.get(f"ha.{GUEST}") == stored("off"))
@@ -492,6 +554,50 @@ async def test_config_reload_resyncs_the_store_from_the_cache(ws_stub, store, mo
     assert [m["type"] for m in ws_stub.received].count("get_states") == 1  # no refetch needed
 
 
+async def test_a_failing_entity_source_does_not_stop_the_tracking(
+    ws_stub, store, monkeypatch, caplog
+):
+    monkeypatch.setattr(ha_module, "WATCH_INTERVAL", 0.02)
+    ws_stub.states = [light(GUEST, "on"), light("light.desk", "off")]
+    source = {"fail": False, "wanted": {GUEST}}
+
+    def entities() -> set[str]:
+        if source["fail"]:
+            raise RuntimeError("config is half loaded")
+        return set(source["wanted"])
+
+    with caplog.at_level(logging.ERROR):
+        async with running(make_ha(ws_stub.url, store, entities)):
+            await eventually(lambda: store.get("ha.online") is True)
+            source["fail"] = True
+            await eventually(lambda: any(r.exc_info for r in caplog.records))
+            source["wanted"] = {"light.desk"}
+            source["fail"] = False
+            await eventually(lambda: store.get("ha.light.desk") == stored("off"))
+    assert "half loaded" in caplog.text
+
+
+# --- proxies ----------------------------------------------------------------
+
+
+@pytest.fixture
+def dead_proxy(monkeypatch):
+    """Every proxy variable points at a port nothing listens on."""
+    for name in ("http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.setenv(name, "http://127.0.0.1:9")
+        monkeypatch.setenv(name.upper(), "http://127.0.0.1:9")
+
+
+async def test_call_service_ignores_proxy_environment_variables(ha, http_stub, dead_proxy):
+    await ha.call_service("light.toggle", GUEST)
+    assert len(http_stub.requests) == 1
+
+
+async def test_the_websocket_ignores_proxy_environment_variables(ws_stub, store, dead_proxy):
+    async with running(make_ha(ws_stub.url, store, {GUEST})):
+        await eventually(lambda: store.get("ha.online") is True)
+
+
 # --- entities_in ------------------------------------------------------------
 
 
@@ -535,14 +641,19 @@ class FakeHa:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, dict[str, Any] | None]] = []
         self.block: asyncio.Event | None = None
-        self.error: Exception | None = None
+        self.errors: list[Exception | None] = []  # what each call raises, in order
+        self.resyncs = 0
 
     async def call_service(self, service: str, entity_id: str, data: dict[str, Any] | None = None):
         self.calls.append((service, entity_id, data))
+        error = self.errors.pop(0) if self.errors else None
         if self.block is not None:
             await self.block.wait()
-        if self.error is not None:
-            raise self.error
+        if error is not None:
+            raise error
+
+    def resync(self) -> None:
+        self.resyncs += 1
 
 
 def make_services(store: StateStore, ha) -> Services:
@@ -624,21 +735,57 @@ async def test_turn_without_a_level_to_step_from_does_nothing(store, entity):
     assert ha.calls == []
 
 
-async def test_turn_does_not_write_the_store(store):
-    store.set(f"ha.{GUEST}", stored("on", brightness=128))
+async def test_turn_shows_the_new_level_at_once(store):
+    ha = FakeHa()
+    ha.block = asyncio.Event()  # Home Assistant has not answered
+    store.set(f"ha.{GUEST}", stored("on", brightness=128, friendly_name="Guest"))  # 50 %
+    services = make_services(store, ha)
+    dial = brightness_dial(services)
+    await dial.on_turn(1)
+    assert store.get(f"ha.{GUEST}") == stored("on", brightness=140, friendly_name="Guest")
+    strip = segment_view(DialSpec(kind="ha.brightness", entity_id=GUEST), store, services.config)
+    assert strip.value == "55%"
+    ha.block.set()
+    await settle()
+
+
+async def test_turning_an_off_light_up_shows_it_on(store):
+    store.set(f"ha.{GUEST}", stored("off", friendly_name="Guest"))
+    await brightness_dial(make_services(store, FakeHa())).on_turn(1)
+    assert store.get(f"ha.{GUEST}") == stored("on", brightness=13, friendly_name="Guest")
+
+
+async def test_turning_a_light_down_to_zero_shows_it_off(store):
+    store.set(f"ha.{GUEST}", stored("on", brightness=8))  # 3 %
+    services = make_services(store, FakeHa())
+    await brightness_dial(services).on_turn(-1)
+    assert store.get(f"ha.{GUEST}") == stored("off", brightness=None)
+    strip = segment_view(DialSpec(kind="ha.brightness", entity_id=GUEST), store, services.config)
+    assert strip.value == "off"
+
+
+async def test_every_level_the_dial_shows_reads_back_as_itself():
+    for level in range(101):
+        assert _brightness_pct(_with_brightness(None, level)) == level
+
+
+async def test_a_turn_that_changes_nothing_does_not_write_the_store(store):
+    store.set(f"ha.{GUEST}", stored("on", brightness=255))
     seen: list[set[str]] = []
     store.subscribe(seen.append)
-    await brightness_dial(make_services(store, FakeHa())).on_turn(1)
+    await brightness_dial(make_services(store, FakeHa())).on_turn(1)  # already at 100 %
     await settle()
-    assert seen == []  # Home Assistant's state_changed event is what moves the display
+    assert seen == []
 
 
 async def test_dial_without_a_home_assistant_client_does_nothing(store):
     store.set(f"ha.{GUEST}", stored("on", brightness=128))
+    before = store.snapshot()
     dial = brightness_dial(make_services(store, None))
     await dial.on_turn(1)
     await dial.on_press()
     await settle()
+    assert store.snapshot() == before
 
 
 async def test_turn_in_flight_steps_from_the_target_not_a_stale_state(store):
@@ -649,6 +796,7 @@ async def test_turn_in_flight_steps_from_the_target_not_a_stale_state(store):
     await dial.on_turn(1)  # 55, in flight
     store.set(f"ha.{GUEST}", stored("on", brightness=128))  # a push still carrying 50 %
     await dial.on_turn(1)
+    assert store.get(f"ha.{GUEST}") == stored("on", brightness=153)  # 60 %: put back
     await dial.on_turn(1)
     ha.block.set()
     await settle()
@@ -667,9 +815,23 @@ async def test_turn_after_the_sends_steps_from_the_state_again(store):
     assert ha.calls == [turn_on(55), turn_on(15)]
 
 
+async def test_a_turn_at_the_limit_mid_spin_puts_back_the_level(store):
+    ha = FakeHa()
+    ha.block = asyncio.Event()
+    store.set(f"ha.{GUEST}", stored("off"))
+    dial = brightness_dial(make_services(store, ha))
+    await dial.on_turn(20)  # 100 %, in flight
+    store.set(f"ha.{GUEST}", stored("on", brightness=13))  # a stale event
+    await dial.on_turn(1)  # nowhere to go, but the display is wrong
+    assert store.get(f"ha.{GUEST}") == stored("on", brightness=255)
+    ha.block.set()
+    await settle()
+    assert ha.calls == [turn_on(100)]
+
+
 async def test_send_failure_is_logged_without_a_traceback_and_ends_the_target(store, caplog):
     ha = FakeHa()
-    ha.error = RuntimeError("Home Assistant unreachable: refused")
+    ha.errors = [RuntimeError("Home Assistant unreachable: refused")]
     store.set(f"ha.{GUEST}", stored("on", brightness=128))
     dial = brightness_dial(make_services(store, ha))
     with caplog.at_level(logging.WARNING):
@@ -678,10 +840,39 @@ async def test_send_failure_is_logged_without_a_traceback_and_ends_the_target(st
     (record,) = caplog.records
     assert record.name == "deck.ha" and record.exc_info is None
     assert GUEST in record.message and "55" in record.message and "refused" in record.message
-    ha.error = None
+    assert ha.resyncs == 1  # the display goes back to what Home Assistant says
+    store.set(f"ha.{GUEST}", stored("on", brightness=128))  # which is where the next turn starts
     await dial.on_turn(1)
     await settle()
     assert ha.calls == [turn_on(55), turn_on(55)]  # stepped from the state, not the failed target
+    assert ha.resyncs == 1
+
+
+async def test_a_failed_older_request_does_not_resync_while_a_newer_one_is_waiting(store):
+    ha = FakeHa()
+    ha.block = asyncio.Event()
+    ha.errors = [RuntimeError("Home Assistant unreachable: refused")]  # the first request fails
+    store.set(f"ha.{GUEST}", stored("on", brightness=128))
+    dial = brightness_dial(make_services(store, ha))
+    await dial.on_turn(1)  # 55, in flight
+    await dial.on_turn(1)  # 60, waiting
+    ha.block.set()
+    await settle()
+    assert ha.calls == [turn_on(55), turn_on(60)]
+    assert ha.resyncs == 0  # the newer request succeeded: nothing to put back
+
+
+async def test_a_failed_request_puts_back_the_state_home_assistant_reported(ws_stub, store, caplog):
+    ws_stub.states = [light(GUEST, "on", brightness=128)]
+    ha = make_ha(ws_stub.url, store, {GUEST})  # the stub speaks WebSocket only: REST fails
+    async with running(ha):
+        await eventually(lambda: store.get("ha.online") is True)
+        dial = brightness_dial(make_services(store, ha))
+        with caplog.at_level(logging.WARNING):
+            await dial.on_turn(1)
+            assert store.get(f"ha.{GUEST}") == stored("on", brightness=140)  # shown at once
+            await eventually(lambda: store.get(f"ha.{GUEST}") == stored("on", brightness=128))
+    assert "setting light.guest_room to 55% failed" in caplog.text
 
 
 async def test_press_toggles_the_light(store):

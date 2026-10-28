@@ -39,8 +39,8 @@ WATCH_INTERVAL = 1.0  # seconds between looks at which entities the config shows
 MAX_ERROR_DETAIL = 200  # characters of an error body that go into a message
 
 BRIGHTNESS_STEP = 5  # percent per dial tick
-GET_STATES_ID = 1
-SUBSCRIBE_ID = 2
+SUBSCRIBE_ID = 1  # Home Assistant wants the ids of one connection to increase
+GET_STATES_ID = 2
 
 EntitySource = set[str] | Callable[[], set[str]]
 
@@ -60,8 +60,9 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-# Home Assistant is on the LAN: no proxy from the environment.
-_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
+def _opener() -> urllib.request.OpenerDirector:
+    """Home Assistant is on the LAN: no proxy from the environment, and no redirects."""
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
 
 
 def websocket_url(url: str) -> str:
@@ -121,6 +122,7 @@ class HomeAssistant:
         self._cache: dict[str, dict[str, Any]] = {}  # every entity Home Assistant has told us of
         self._tracked = self._wanted()  # the entities mirrored into the store
         self._online = False
+        self._loading = False  # True while a new connection fetches the states
         self._delay = BACKOFF_START
 
     # --- services ---------------------------------------------------------------
@@ -148,7 +150,7 @@ class HomeAssistant:
             headers={"Authorization": f"Bearer {self._token}", "Content-Type": "application/json"},
         )
         try:
-            with _OPENER.open(request, timeout=REQUEST_TIMEOUT) as response:
+            with _opener().open(request, timeout=REQUEST_TIMEOUT) as response:
                 response.read()
         except urllib.error.HTTPError as exc:
             with exc:
@@ -163,7 +165,7 @@ class HomeAssistant:
 
     async def run(self) -> None:
         """Connect, mirror state and reconnect until cancelled."""
-        self._sync()  # ha.online = False until the first connection is up
+        self.resync()  # ha.online = False until the first connection is up
         watcher = asyncio.create_task(self._watch_entities())
         try:
             while True:
@@ -191,19 +193,26 @@ class HomeAssistant:
         async with connect(
             self._ws_url, max_size=MAX_MESSAGE_SIZE, open_timeout=CONNECT_TIMEOUT, proxy=None
         ) as ws:
-            async with asyncio.timeout(HANDSHAKE_TIMEOUT):
-                await self._authenticate(ws)
-                states = await self._call(ws, {"id": GET_STATES_ID, "type": "get_states"})
-                self._cache = {
-                    raw["entity_id"]: _entity(raw)
-                    for raw in states or []
-                    if isinstance(raw, dict) and isinstance(raw.get("entity_id"), str)
-                }
-                subscribe = {"id": SUBSCRIBE_ID, "type": "subscribe_events"}
-                await self._call(ws, {**subscribe, "event_type": "state_changed"})
+            self._loading = True
+            try:
+                async with asyncio.timeout(HANDSHAKE_TIMEOUT):
+                    await self._authenticate(ws)
+                    # Subscribe first: a change between the snapshot and a later subscription
+                    # would be lost. Events that arrive before the snapshot are older than it.
+                    self._cache = {}
+                    subscribe = {"id": SUBSCRIBE_ID, "type": "subscribe_events"}
+                    await self._call(ws, {**subscribe, "event_type": "state_changed"})
+                    states = await self._call(ws, {"id": GET_STATES_ID, "type": "get_states"})
+                    self._cache = {
+                        raw["entity_id"]: _entity(raw)
+                        for raw in states or []
+                        if isinstance(raw, dict) and isinstance(raw.get("entity_id"), str)
+                    }
+            finally:
+                self._loading = False
             self._delay = BACKOFF_START
             self._online = True
-            self._sync()
+            self.resync()
             log.info("connected to Home Assistant")
             async for raw in ws:
                 self._handle(_parse(raw))
@@ -247,15 +256,18 @@ class HomeAssistant:
         else:
             return
         if entity_id in self._tracked:
-            self._sync()
+            self.resync()
 
     async def _watch_entities(self) -> None:
         while True:
             await asyncio.sleep(WATCH_INTERVAL)
-            wanted = self._wanted()
-            if wanted != self._tracked:
-                self._tracked = wanted
-                self._sync()
+            try:
+                wanted = self._wanted()
+                if wanted != self._tracked:
+                    self._tracked = wanted
+                    self.resync()
+            except Exception:  # tracking must not die silently
+                log.exception("cannot follow the entities of the config")
 
     def _wanted(self) -> set[str]:
         return set(self._entities() if callable(self._entities) else self._entities)
@@ -263,10 +275,16 @@ class HomeAssistant:
     def _set_online(self, online: bool) -> None:
         if online != self._online:
             self._online = online
-            self._sync()
+            self.resync()
 
-    def _sync(self) -> None:
-        """Make the store's `ha.*` keys the connection state and the cached tracked entities."""
+    def resync(self) -> None:
+        """Make the store's `ha.*` keys the connection state and the cached tracked entities.
+
+        What Home Assistant last said wins: this also takes back a value that was written
+        ahead of it, such as the level a dial showed for a request that then failed.
+        """
+        if self._loading:  # the cache is being rebuilt: the store keeps the last full state
+            return
         values: dict[str, Any] = {"online": self._online}
         values.update((e, self._cache[e]) for e in self._tracked if e in self._cache)
         self._store.update("ha.", values, replace=True)
@@ -301,13 +319,23 @@ def _brightness_pct(entity: Any) -> int | None:
     return round(level * 100 / 255)
 
 
+def _with_brightness(entity: Any, level: int) -> dict[str, Any]:
+    """`entity` as Home Assistant will report it once its brightness is `level` percent."""
+    attributes = dict(entity.get("attributes") or {}) if isinstance(entity, dict) else {}
+    if level == 0:  # a brightness of 0 % turns the light off, and off lights have none
+        return {"state": "off", "attributes": {**attributes, "brightness": None}}
+    return {"state": "on", "attributes": {**attributes, "brightness": round(level * 255 / 100)}}
+
+
 class HaBrightnessDial:
     """Turn: a light's brightness up or down by 5 % a tick. Press: toggle the light.
 
-    The requests go through a `Coalescer`, so a fast spin sends the first and the last level,
-    not every tick. The display follows Home Assistant's own state events. While requests are
-    in flight or waiting, each turn steps from the dial's own target, not from the store: an
-    event that still reports the level before the spin would make the dial lose ticks.
+    Turning is shown at once (the store is written before Home Assistant answers) and the
+    requests go through a `Coalescer`, so a fast spin sends the first and the last level, not
+    every tick. Home Assistant's own state events then confirm or correct the display, and a
+    request that fails puts back what Home Assistant last reported. While requests are in
+    flight or waiting, each turn steps from the dial's own target, not from the store: an event
+    that still reports the level before the spin would make the dial lose ticks.
     """
 
     def __init__(self, spec: DialSpec, services: Services) -> None:
@@ -321,12 +349,17 @@ class HaBrightnessDial:
     async def on_turn(self, ticks: int) -> None:
         if self._services.ha is None:
             return
+        store = self._services.store
+        key = f"ha.{self._entity_id}"
         current = self._target
         if current is None:
-            current = _brightness_pct(self._services.store.get(f"ha.{self._entity_id}"))
+            current = _brightness_pct(store.get(key))
         if current is None:  # unavailable, or a light without brightness: nothing to step from
             return
         level = max(0, min(100, current + BRIGHTNESS_STEP * ticks))
+        if level != current or self._target is not None:
+            # Also puts back a level that a stale event has overwritten mid-spin.
+            store.set(key, _with_brightness(store.get(key), level))
         if level != current:
             self._submitted += 1
             self._target = level
@@ -338,16 +371,19 @@ class HaBrightnessDial:
 
     async def _send(self, request: tuple[int, int]) -> None:
         number, level = request
+        ha = self._services.ha
+        failed = True
         try:
-            if self._services.ha is not None:
-                await self._services.ha.call_service(
-                    "light.turn_on", self._entity_id, {"brightness_pct": level}
-                )
+            if ha is not None:
+                await ha.call_service("light.turn_on", self._entity_id, {"brightness_pct": level})
+            failed = False
         except RuntimeError as exc:
             log.warning("setting %s to %d%% failed: %s", self._entity_id, level, exc)
         finally:
             if number == self._submitted:  # no newer request is waiting
                 self._target = None
+                if failed and ha is not None:
+                    ha.resync()  # the display goes back to what Home Assistant says
 
 
 DIAL_FACTORIES["ha.brightness"] = HaBrightnessDial
