@@ -154,8 +154,15 @@ def _remote(args: argparse.Namespace) -> int:
         stream=sys.stderr,  # stdout carries the protocol and nothing else
     )
     executor = MacExecutor(Runner())
+
+    async def serve() -> None:
+        try:
+            await serve_stdio(executor, MacPoller(Runner(), executor))
+        finally:
+            await executor.aclose()
+
     try:
-        asyncio.run(serve_stdio(executor, MacPoller(Runner(), executor)))
+        asyncio.run(serve())
     except KeyboardInterrupt:
         pass
     return 0

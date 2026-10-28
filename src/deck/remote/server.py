@@ -252,10 +252,10 @@ def _args_error(kind: str, args: Any) -> str | None:
         url = args.get("url") if isinstance(args, dict) else None
     else:
         return None
-    return None if _is_http_url(url) else "url must be an http or https URL"
+    return None if is_http_url(url) else "url must be an http or https URL"
 
 
-def _is_http_url(value: Any) -> bool:
+def is_http_url(value: Any) -> bool:
     if not isinstance(value, str):
         return False
     # urlsplit silently drops some whitespace and control characters, so it would judge a

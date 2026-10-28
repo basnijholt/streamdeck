@@ -1,4 +1,6 @@
+import asyncio
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -11,6 +13,7 @@ from deck import cli
 from deck.remote.mac import (
     ACTIVE_URL_SCRIPT,
     BRAVE_TAB_SCRIPT,
+    INPUT_VOLUME_SCRIPT,
     KM_SCRIPT,
     VOLUME_MUTE_SCRIPT,
     VOLUME_SCRIPT,
@@ -51,23 +54,84 @@ def lines(*objects: str) -> Result:
     return Result(0, "".join(o + "\n" for o in objects), "")
 
 
-class FakeSleep:
+class FakeClock:
     def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class FakeSleep:
+    """Records each sleep and moves the clock forward by it."""
+
+    def __init__(self, clock: FakeClock) -> None:
+        self.clock = clock
         self.calls: list[float] = []
 
     async def __call__(self, delay: float) -> None:
         self.calls.append(delay)
+        self.clock.now += delay
 
 
 class TimeoutRunner(FakeRunner):
-    """A FakeRunner that also remembers the timeout of each call."""
+    """A FakeRunner that also remembers the timeout of each call (None when not given)."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.timeouts: list[float] = []
+        self.timeouts: list[float | None] = []
+
+    async def run(self, argv, timeout=None):
+        self.timeouts.append(timeout)
+        return await super().run(argv, timeout)
+
+    def timeout_of(self, prefix: list[str]) -> float | None:
+        (timeout,) = [t for c, t in zip(self.calls, self.timeouts) if c[: len(prefix)] == prefix]
+        return timeout
+
+
+class SlowRunner(FakeRunner):
+    """A FakeRunner whose `blueutil --connect` takes `cost` seconds of fake time."""
+
+    def __init__(self, clock: FakeClock, cost: float) -> None:
+        super().__init__()
+        self.clock = clock
+        self.cost = cost
 
     async def run(self, argv, timeout=10):
-        self.timeouts.append(timeout)
+        if argv[:2] == ["blueutil", "--connect"]:
+            self.clock.now += self.cost
+        return await super().run(argv, timeout)
+
+
+class CancelWatchRunner(FakeRunner):
+    """Counts the calls that were cancelled while running."""
+
+    cancelled = 0
+
+    async def run(self, argv, timeout=10):
+        try:
+            return await super().run(argv, timeout)
+        except asyncio.CancelledError:
+            self.cancelled += 1
+            raise
+
+
+class MicRunner(FakeRunner):
+    """A mic with an input volume: every call yields to the loop, so presses could interleave."""
+
+    def __init__(self, volume: int) -> None:
+        super().__init__()
+        self.volume = volume
+
+    async def run(self, argv, timeout=10):
+        await asyncio.sleep(0)
+        if argv == GET_INPUT_VOLUME:
+            await asyncio.sleep(0)
+            return Result(0, f"{self.volume}\n", "")
+        if argv[:3] == ["osascript", "-e", INPUT_VOLUME_SCRIPT]:
+            await asyncio.sleep(0)
+            self.volume = int(argv[-1])
         return await super().run(argv, timeout)
 
 
@@ -77,8 +141,13 @@ def runner() -> FakeRunner:
 
 
 @pytest.fixture
-def fake_sleep() -> FakeSleep:
-    return FakeSleep()
+def clock() -> FakeClock:
+    return FakeClock()
+
+
+@pytest.fixture
+def fake_sleep(clock) -> FakeSleep:
+    return FakeSleep(clock)
 
 
 @pytest.fixture
@@ -89,8 +158,8 @@ def scripts_dir(tmp_path):
 
 
 @pytest.fixture
-def executor(runner, scripts_dir, fake_sleep) -> MacExecutor:
-    return MacExecutor(runner, scripts_dir, sleep=fake_sleep)
+def executor(runner, scripts_dir, fake_sleep, clock) -> MacExecutor:
+    return MacExecutor(runner, scripts_dir, sleep=fake_sleep, clock=clock)
 
 
 @pytest.fixture
@@ -183,7 +252,6 @@ async def test_unknown_kind_is_refused(executor, runner):
         ("volume", 100, volume_argv(100)),
         ("volume", {"mute": "toggle"}, volume_mute_argv()),
         ("audio.input", "Q9 USB", ["SwitchAudioSource", "-t", "input", "-s", "Q9 USB"]),
-        ("screenshot", None, screenshot_argv()),
         ("lock", None, lock_argv()),
     ],
 )
@@ -224,6 +292,8 @@ async def test_kind_runs_its_command(executor, runner, kind, args, argv):
         ("audio.output", {"name": "iLoud"}),
         ("audio.output", {"match": "iloud"}),
         ("audio.output", {"name": 1, "match": "iloud"}),
+        ("audio.output", {"name": "", "match": "iloud"}),
+        ("audio.output", {"name": "iLoud", "match": ""}),
         ("audio.output", {"name": "iLoud", "match": 1}),
         ("audio.output", {"name": "iLoud", "match": "iloud", "bt": 5}),
         ("audio.output", {"name": "iLoud", "match": "iloud", "bt": "-x"}),
@@ -238,6 +308,7 @@ async def test_kind_runs_its_command(executor, runner, kind, args, argv):
         ("script", ".."),
         ("script", "."),
         ("script", "a b"),
+        ("script", "go.sh\n"),
         ("script", 5),
     ],
 )
@@ -267,9 +338,10 @@ async def test_timed_out_command_raises(executor, runner):
         await executor.run("lock", None)
 
 
-async def test_every_command_has_an_explicit_timeout_of_at_most_10_seconds(scripts_dir, fake_sleep):
+async def test_every_command_has_an_explicit_timeout(scripts_dir, fake_sleep, clock):
+    """At most 10 s each; only the screenshot's selection UI may run longer (60 s)."""
     runner = TimeoutRunner()
-    executor = MacExecutor(runner, scripts_dir, sleep=fake_sleep)
+    executor = MacExecutor(runner, scripts_dir, sleep=fake_sleep, clock=clock)
     (scripts_dir / "go.sh").write_text("#!/bin/sh\n")
     (scripts_dir / "go.sh").chmod(0o755)
     runner.script(BT_CONNECTED, Result(0, "[]", ""))
@@ -290,8 +362,54 @@ async def test_every_command_has_an_explicit_timeout_of_at_most_10_seconds(scrip
         ("active_url", None),
     ]:
         await executor.run(kind, args)
+    await asyncio.sleep(0)  # let the background screenshot start
+    await executor.aclose()
     assert len(runner.timeouts) == len(runner.calls) > 12
-    assert all(0 < t <= 10 for t in runner.timeouts)
+    assert runner.timeout_of(screenshot_argv()) == 60
+    assert runner.timeout_of(["blueutil", "--connect"]) == 4
+    others = [t for c, t in zip(runner.calls, runner.timeouts) if c != screenshot_argv()]
+    assert all(t is not None and 0 < t <= 10 for t in others)
+
+
+# --- screenshot -------------------------------------------------------------
+
+
+async def test_screenshot_returns_while_the_selection_is_still_up(executor, runner):
+    runner.block = asyncio.Event()  # `screencapture -ic` runs until the user is done
+    assert await asyncio.wait_for(executor.run("screenshot", None), 2) is None
+    await asyncio.sleep(0)
+    assert runner.calls == [screenshot_argv()]
+    runner.block.set()
+    await executor.aclose()
+
+
+async def test_new_screenshot_stops_the_previous_one(scripts_dir, fake_sleep):
+    runner = CancelWatchRunner()
+    runner.block = asyncio.Event()
+    executor = MacExecutor(runner, scripts_dir, sleep=fake_sleep)
+    await executor.run("screenshot", None)
+    await asyncio.sleep(0)
+    await executor.run("screenshot", None)
+    await asyncio.sleep(0)
+    assert runner.calls == [screenshot_argv()] * 2
+    assert runner.cancelled == 1
+    await executor.aclose()
+    assert runner.cancelled == 2
+
+
+async def test_aclose_without_a_screenshot_is_fine(executor):
+    await executor.aclose()
+    await executor.aclose()
+
+
+async def test_screenshot_cancelled_by_escape_is_only_logged_at_debug(executor, runner, caplog):
+    runner.script(["screencapture"], Result(1, "", "screencapture: cancelled\n"))
+    with caplog.at_level(logging.DEBUG, logger="deck.remote.mac"):
+        await executor.run("screenshot", None)
+        await asyncio.sleep(0)
+    records = [r for r in caplog.records if r.name == "deck.remote.mac"]
+    assert records and all(r.levelno == logging.DEBUG for r in records)
+    assert "cancelled" in records[0].getMessage()
 
 
 # --- active_url -------------------------------------------------------------
@@ -353,17 +471,54 @@ async def test_output_without_bt_missing_device_fails_at_once(executor, runner, 
     with pytest.raises(RemoteError, match="Monitor did not appear"):
         await executor.run("audio.output", {"name": "Monitor", "match": "dell"})
     assert runner.calls == [LIST_OUTPUTS]
-    assert fake_sleep.calls == [0.5]
+    assert fake_sleep.calls == []
 
 
-async def test_output_bt_timeout(executor, runner, fake_sleep):
+async def test_output_bt_timeout(executor, runner, fake_sleep, clock):
+    started = clock.now
     runner.script(BT_CONNECTED, Result(0, "[]", ""))
     runner.script(LIST_OUTPUTS, *[lines(device("MacBook Speakers"))] * 30)
     with pytest.raises(RemoteError, match="iLoud did not appear"):
         await executor.run("audio.output", ILOUD | {"name": "iLoud"})
-    assert runner.calls.count(LIST_OUTPUTS) == 20
+    # polls at 0, 0.5 ... 10 s; the last one is at the deadline and nothing sleeps after it
+    assert runner.calls.count(LIST_OUTPUTS) == 21
     assert fake_sleep.calls == [0.5] * 20
+    assert clock.now - started == 10
     assert not any(c[:3] == ["SwitchAudioSource", "-t", "output"] for c in runner.calls)
+
+
+async def test_output_connect_time_counts_toward_the_wait(scripts_dir, fake_sleep, clock):
+    runner = SlowRunner(clock, cost=4)
+    executor = MacExecutor(runner, scripts_dir, sleep=fake_sleep, clock=clock)
+    started = clock.now
+    runner.script(BT_CONNECTED, Result(0, "[]", ""))
+    runner.script(LIST_OUTPUTS, *[lines(device("MacBook Speakers"))] * 30)
+    with pytest.raises(RemoteError, match="iLoud did not appear"):
+        await executor.run("audio.output", ILOUD | {"name": "iLoud"})
+    assert runner.calls.count(LIST_OUTPUTS) == 13  # polls at 4, 4.5 ... 10 s
+    assert sum(fake_sleep.calls) == 6
+    assert clock.now - started == 10
+
+
+async def test_output_last_sleep_stops_at_the_deadline(scripts_dir, fake_sleep, clock):
+    runner = SlowRunner(clock, cost=4.25)
+    executor = MacExecutor(runner, scripts_dir, sleep=fake_sleep, clock=clock)
+    started = clock.now
+    runner.script(BT_CONNECTED, Result(0, "[]", ""))
+    with pytest.raises(RemoteError, match="did not appear"):
+        await executor.run("audio.output", ILOUD | {"name": "iLoud"})
+    assert fake_sleep.calls == [0.5] * 11 + [0.25]
+    assert clock.now - started == 10
+
+
+async def test_output_polls_once_when_connecting_used_up_the_wait(scripts_dir, fake_sleep, clock):
+    runner = SlowRunner(clock, cost=11)
+    executor = MacExecutor(runner, scripts_dir, sleep=fake_sleep, clock=clock)
+    runner.script(BT_CONNECTED, Result(0, "[]", ""))
+    with pytest.raises(RemoteError, match="did not appear"):
+        await executor.run("audio.output", ILOUD | {"name": "iLoud"})
+    assert runner.calls.count(LIST_OUTPUTS) == 1
+    assert fake_sleep.calls == []
 
 
 async def test_output_connect_failure_raises(executor, runner):
@@ -429,6 +584,14 @@ async def test_mute_does_not_flip_the_flag_when_the_toggle_fails(executor, runne
     with pytest.raises(RemoteError, match="no device"):
         await executor.run("mic.mute", None)
     assert executor.coreaudio_muted is False
+
+
+@pytest.mark.parametrize("start", [75, 0])
+async def test_concurrent_mic_presses_each_toggle_once(scripts_dir, fake_sleep, start):
+    runner = MicRunner(start)
+    executor = MacExecutor(runner, scripts_dir, sleep=fake_sleep)
+    await asyncio.gather(executor.run("mic.mute", None), executor.run("mic.mute", None))
+    assert runner.volume == start  # two toggles end where they began
 
 
 async def test_mute_garbled_volume_raises(executor, runner):

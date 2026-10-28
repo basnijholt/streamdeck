@@ -15,31 +15,29 @@ import json
 import logging
 import os
 import re
+import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 from deck.audio import matches, preferred_input
-from deck.remote.server import (
-    Executor,
-    Poller,
-    RemoteError,
-    _is_http_url,  # the same check the server applies, so both sides judge URLs alike
-)
+from deck.remote.server import Executor, Poller, RemoteError, is_http_url
 from deck.runner import Result, Runner
 
 log = logging.getLogger(__name__)
 
 DEFAULT_SCRIPTS_DIR = Path("~/.config/deck/scripts")
 
-ACTION_TIMEOUT = 10  # seconds; every action command stays under the PC's 15 s request timeout
+ACTION_TIMEOUT = 10  # seconds; every command but the screenshot stays under the PC's 15 s limit
 QUERY_TIMEOUT = 5  # seconds; the poller must not stall on a hung tool
+SCREENSHOT_TIMEOUT = 60  # seconds the selection UI may stay up; it is not awaited by the request
+BT_CONNECT_TIMEOUT = 4  # seconds for `blueutil --connect`; the rest of the budget goes to polling
+BT_WAIT = 10  # seconds, from the start of the request, for a Bluetooth device to appear
 BT_POLL_INTERVAL = 0.5  # seconds
-BT_POLL_ATTEMPTS = 20  # 20 x 0.5 s: wait up to 10 s for a Bluetooth device to appear
 DEFAULT_INPUT_VOLUME = 75  # restored on unmute when no level was saved
 MAX_ERROR_LENGTH = 200
 
-_SCRIPT_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
+_SCRIPT_NAME = re.compile(r"[A-Za-z0-9._-]+")  # used with fullmatch: `$` accepts "\n"
 
 # --- AppleScript ------------------------------------------------------------
 
@@ -264,14 +262,18 @@ class MacExecutor(Executor):
         runner: Runner,
         scripts_dir: Path = DEFAULT_SCRIPTS_DIR,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._runner = runner
         self._scripts_dir = scripts_dir.expanduser()
         self._sleep = sleep
+        self._clock = clock
         self.input_prefs: list[str] = []  # from the hello; the poller's input pin uses them
         self.pin_input = False
         self.coreaudio_muted = False  # the mic's mute flag when it has no input volume
         self._saved_input_volume = DEFAULT_INPUT_VOLUME
+        self._mic_lock = asyncio.Lock()  # a toggle reads then writes; presses must not interleave
+        self._screenshot_task: asyncio.Task[None] | None = None
         self._handlers: dict[str, Callable[[Any], Awaitable[Any]]] = {
             "app": self._app,
             "url": self._url,
@@ -295,6 +297,10 @@ class MacExecutor(Executor):
         self.input_prefs = [p for p in prefs if isinstance(p, str)]
         self.pin_input = audio.get("pin_input") is True
 
+    async def aclose(self) -> None:
+        """Stop the screenshot selection still running in the background, if any."""
+        await self._stop_screenshot()
+
     async def run(self, kind: str, args: Any) -> Any:
         handler = self._handlers.get(kind)
         if handler is None:
@@ -314,7 +320,7 @@ class MacExecutor(Executor):
         await self._ok(app_argv(args))
 
     async def _url(self, args: Any) -> None:
-        if not _is_http_url(args):
+        if not is_http_url(args):
             raise _bad_args("url")
         await self._ok(url_argv(args))
 
@@ -322,7 +328,7 @@ class MacExecutor(Executor):
         if not (
             isinstance(args, dict)
             and _is_arg_text(args.get("match"))
-            and _is_http_url(args.get("url"))
+            and is_http_url(args.get("url"))
             and isinstance(args.get("navigate", False), bool)
         ):
             raise _bad_args("tab")
@@ -342,7 +348,25 @@ class MacExecutor(Executor):
             raise _bad_args("volume")
 
     async def _screenshot(self, args: Any) -> None:
-        await self._ok(screenshot_argv())
+        """Bring up the selection UI and return: `screencapture -ic` runs until the user is done."""
+        await self._stop_screenshot()
+        self._screenshot_task = asyncio.create_task(self._capture())
+
+    async def _capture(self) -> None:
+        argv = screenshot_argv()
+        try:
+            result = await self._runner.run(argv, timeout=SCREENSHOT_TIMEOUT)
+        except Exception:
+            log.exception("%s failed", argv[0])
+            return
+        if result.rc != 0:  # Esc cancels the selection, which is normal
+            log.debug("%s: %s", argv[0], _first_line(result, argv))
+
+    async def _stop_screenshot(self) -> None:
+        task, self._screenshot_task = self._screenshot_task, None
+        if task is not None:
+            task.cancel()  # the runner kills the process when cancelled
+            await asyncio.gather(task, return_exceptions=True)
 
     async def _lock(self, args: Any) -> None:
         await self._ok(lock_argv())
@@ -360,23 +384,25 @@ class MacExecutor(Executor):
         if not (
             isinstance(args, dict)
             and isinstance(args.get("name"), str)
+            and bool(args["name"])
             and isinstance(args.get("match"), str)
+            and bool(args["match"])
             and (args.get("bt") is None or _is_arg_text(args["bt"]))
             and isinstance(args.get("disconnect", False), bool)
         ):
             raise _bad_args("audio.output")
+        deadline = self._clock() + BT_WAIT
         name, match, bt = args["name"], args["match"], args.get("bt")
         if args.get("disconnect", False):
             if bt is None:
                 raise _bad_args("audio.output")
             await self._ok(["blueutil", "--disconnect", bt])
             return
-        attempts = 1
-        if bt is not None:
-            attempts = BT_POLL_ATTEMPTS
-            if not await self._bt_connected(bt):
-                await self._ok(["blueutil", "--connect", bt])
-        device = await self._wait_for_output(match, attempts)
+        if bt is None:
+            deadline = self._clock()  # nothing to wait for: one look at the devices
+        elif not await self._bt_connected(bt):
+            await self._ok(["blueutil", "--connect", bt], timeout=BT_CONNECT_TIMEOUT)
+        device = await self._wait_for_output(match, deadline)
         if device is None:
             raise RemoteError(f"{name} did not appear")
         await self._ok(switch_argv("output", device))
@@ -392,9 +418,12 @@ class MacExecutor(Executor):
             for d in devices
         )
 
-    async def _wait_for_output(self, match: str, attempts: int) -> str | None:
-        """The first output device matching `match`, polling every 0.5 s up to `attempts` times."""
-        for _ in range(attempts):
+    async def _wait_for_output(self, match: str, deadline: float) -> str | None:
+        """The first output device matching `match`.
+
+        Polls every 0.5 s; the last poll is at the deadline, and nothing sleeps after it.
+        """
+        while True:
             result = await self._ok(list_devices_argv("output"), timeout=QUERY_TIMEOUT)
             try:
                 names = parse_device_names(result.out)
@@ -403,27 +432,30 @@ class MacExecutor(Executor):
             for device in names:
                 if matches(device, match):
                     return device
-            await self._sleep(BT_POLL_INTERVAL)
-        return None
+            remaining = deadline - self._clock()
+            if remaining <= 0:
+                return None
+            await self._sleep(min(BT_POLL_INTERVAL, remaining))
 
     async def _mic_mute(self, args: Any) -> None:
         """Toggle the mic: input volume 0 is muted, because its state reads back."""
-        out = (await self._ok(GET_INPUT_VOLUME)).out.strip()
-        if out == "missing value":  # the device has no software input volume
-            await self._ok(["SwitchAudioSource", "-m", "toggle", "-t", "input"])
-            self.coreaudio_muted = not self.coreaudio_muted
-            return
-        level = _percent(out)
-        if level is None:
-            raise RemoteError("unexpected input volume")
-        if level > 0:
-            self._saved_input_volume = level
-            await self._ok(input_volume_argv(0))
-        else:
-            await self._ok(input_volume_argv(self._saved_input_volume))
+        async with self._mic_lock:
+            out = (await self._ok(GET_INPUT_VOLUME)).out.strip()
+            if out == "missing value":  # the device has no software input volume
+                await self._ok(["SwitchAudioSource", "-m", "toggle", "-t", "input"])
+                self.coreaudio_muted = not self.coreaudio_muted
+                return
+            level = _percent(out)
+            if level is None:
+                raise RemoteError("unexpected input volume")
+            if level > 0:
+                self._saved_input_volume = level
+                await self._ok(input_volume_argv(0))
+            else:
+                await self._ok(input_volume_argv(self._saved_input_volume))
 
     async def _script(self, args: Any) -> None:
-        if not (isinstance(args, str) and _SCRIPT_NAME.match(args) and args not in {".", ".."}):
+        if not (isinstance(args, str) and _SCRIPT_NAME.fullmatch(args) and args not in {".", ".."}):
             raise _bad_args("script")
         base = self._scripts_dir.resolve()
         path = (base / args).resolve()
