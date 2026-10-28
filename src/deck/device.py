@@ -162,6 +162,7 @@ class StreamDeckDevice(Device):
             except _OPEN_ERRORS as exc:
                 log.warning("cannot open deck, retrying in %gs: %s", delay, exc)
             else:
+                log.info("deck connected")
                 delay = RECONNECT_MIN
                 queue: asyncio.Queue[Event] = asyncio.Queue()
                 self._attach(deck, loop, queue)
