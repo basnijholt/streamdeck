@@ -1,8 +1,8 @@
 """Local control socket: JSON Lines over a Unix socket, for `deck reload|state|press`.
 
 One request per line, one response line per request. The commands only touch what the
-daemon already has: reload its config file, read its state, press a configured key. There
-is no command that takes an action, and nothing here reaches the Mac.
+daemon already has: reload its config file, read its state, press a configured key. No
+command takes an action; `press` only runs actions that are already in the config.
 """
 
 import asyncio
@@ -21,6 +21,8 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 BAD_REQUEST = "bad request"
+# `state` answers with the whole store on one line, so the client's line limit is generous.
+MAX_RESPONSE_BYTES = 64 << 20
 
 
 def default_control_path() -> Path:
@@ -74,7 +76,7 @@ async def call(path: Path, message: dict[str, Any]) -> dict[str, Any]:
 
     Raises `FileNotFoundError` or `ConnectionRefusedError` if no daemon is listening.
     """
-    reader, writer = await asyncio.open_unix_connection(path)
+    reader, writer = await asyncio.open_unix_connection(path, limit=MAX_RESPONSE_BYTES)
     try:
         writer.write(json.dumps(message).encode() + b"\n")
         await writer.drain()
@@ -94,7 +96,7 @@ async def _serve_client(
             try:
                 line = await reader.readline()
             except ValueError:  # longer than the reader's limit; the rest cannot be trusted
-                await _send(writer, {"ok": False, "error": BAD_REQUEST})
+                await _send(writer, _encode({"ok": False, "error": BAD_REQUEST}))
                 return
             if not line.endswith(b"\n"):
                 return  # the client went away, possibly mid-request
@@ -106,23 +108,29 @@ async def _serve_client(
         writer.close()
 
 
-async def _send(writer: asyncio.StreamWriter, response: dict[str, Any]) -> None:
-    writer.write(json.dumps(response, default=str).encode() + b"\n")
+async def _send(writer: asyncio.StreamWriter, data: bytes) -> None:
+    writer.write(data)
     await writer.drain()
 
 
-def _respond(line: bytes, daemon: "Daemon") -> dict[str, Any]:
+def _encode(response: dict[str, Any]) -> bytes:
+    return json.dumps(response, default=str).encode() + b"\n"
+
+
+def _respond(line: bytes, daemon: "Daemon") -> bytes:
+    """The response line for one request line; every failure is answered, none is raised."""
     try:
         message = json.loads(line)
     except ValueError:  # includes bad UTF-8
-        return {"ok": False, "error": BAD_REQUEST}
+        return _encode({"ok": False, "error": BAD_REQUEST})
     if not isinstance(message, dict):
-        return {"ok": False, "error": BAD_REQUEST}
+        return _encode({"ok": False, "error": BAD_REQUEST})
     try:
-        return _dispatch(message, daemon)
+        # Encoding is inside the guard: a state value JSON cannot hold must not drop the client.
+        return _encode(_dispatch(message, daemon))
     except Exception:
         log.exception("control request %r failed", message)
-        return {"ok": False, "error": "internal error"}
+        return _encode({"ok": False, "error": "internal error"})
 
 
 def _dispatch(message: dict[str, Any], daemon: "Daemon") -> dict[str, Any]:

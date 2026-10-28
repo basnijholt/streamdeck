@@ -231,6 +231,30 @@ async def test_state_stringifies_values_json_cannot_hold(daemon, sock_path):
     assert response["state"]["t3.threads"] == ["/x"]
 
 
+async def test_state_larger_than_the_default_line_limit_round_trips(daemon, sock_path):
+    big = {f"t3.key{i}": f"value {i} " * 4 for i in range(4000)}
+    daemon.store.update("", big)
+    assert len(json.dumps(daemon.store.snapshot())) > 2 * 65536
+    response = await call(sock_path, {"cmd": "state"})
+    assert response["ok"] is True
+    assert response["state"] == daemon.store.snapshot()
+
+
+async def test_state_that_cannot_be_serialized_is_answered_not_dropped(daemon, sock_path):
+    daemon.store.set("broken", {(1, 2): "tuple keys are not JSON"})
+    reader, writer = await asyncio.open_unix_connection(sock_path)
+    try:
+        writer.write(b'{"cmd": "state"}\n{"cmd": "frobnicate"}\n')
+        await writer.drain()
+        replies = [json.loads(await asyncio.wait_for(reader.readline(), 2)) for _ in range(2)]
+    finally:
+        writer.close()
+    assert replies == [
+        {"ok": False, "error": "internal error"},
+        {"ok": False, "error": "unknown command"},
+    ]
+
+
 async def test_press_runs_the_keys_action(daemon, sock_path, calls):
     response = await call(sock_path, {"cmd": "press", "page": "home", "key": 0})
     assert response == {"ok": True}
