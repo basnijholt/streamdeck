@@ -239,6 +239,25 @@ def _run(args: argparse.Namespace) -> int:
     return 0
 
 
+# Where the Mac's command line tools live: Homebrew (Apple silicon and Intel) and pipx/uv.
+TOOL_DIRS = ("/opt/homebrew/bin", "/usr/local/bin", "~/.local/bin")
+
+
+def _extend_path() -> None:
+    """Put `TOOL_DIRS` that exist and are missing from PATH in front of it.
+
+    An SSH forced command starts with a bare PATH, without Homebrew.
+    """
+    entries = [entry for entry in os.environ.get("PATH", "").split(os.pathsep) if entry]
+    present = {os.path.normpath(entry) for entry in entries}
+    added = []
+    for directory in map(os.path.expanduser, TOOL_DIRS):
+        if os.path.isdir(directory) and os.path.normpath(directory) not in present:
+            added.append(directory)
+    if added:
+        os.environ["PATH"] = os.pathsep.join([*added, *entries])
+
+
 def _remote(args: argparse.Namespace) -> int:
     """Serve the PC's JSON Lines protocol on stdin/stdout (run by its SSH forced command)."""
     logging.basicConfig(
@@ -246,6 +265,7 @@ def _remote(args: argparse.Namespace) -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         stream=sys.stderr,  # stdout carries the protocol and nothing else
     )
+    _extend_path()
     executor = MacExecutor(Runner())
 
     async def serve() -> None:

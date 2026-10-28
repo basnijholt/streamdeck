@@ -1021,8 +1021,71 @@ def test_main_remote_serves_stdio_with_the_mac_executor_and_poller(monkeypatch, 
     assert capsys.readouterr().out == ""
 
 
+def test_extend_path_prepends_missing_tool_directories_that_exist(monkeypatch, tmp_path):
+    brew, local, absent, present = (tmp_path / n for n in ("brew", "local", "absent", "present"))
+    for directory in (brew, local, present):
+        directory.mkdir()
+    monkeypatch.setattr(cli, "TOOL_DIRS", (str(brew), str(present), str(absent), str(local)))
+    monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", f"{present}/", "/bin"]))
+    cli._extend_path()
+    assert os.environ["PATH"].split(os.pathsep) == [
+        str(brew),
+        str(local),
+        "/usr/bin",
+        f"{present}/",  # already there: left where it is
+        "/bin",
+    ]
+
+
+def test_extend_path_expands_the_home_directory(monkeypatch, tmp_path):
+    (tmp_path / ".local" / "bin").mkdir(parents=True)
+    monkeypatch.setattr(cli, "TOOL_DIRS", ("~/.local/bin",))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PATH", "/usr/bin")
+    cli._extend_path()
+    assert os.environ["PATH"] == f"{tmp_path}/.local/bin{os.pathsep}/usr/bin"
+
+
+@pytest.mark.parametrize("path", [None, ""])
+def test_extend_path_without_a_path(monkeypatch, tmp_path, path):
+    monkeypatch.setattr(cli, "TOOL_DIRS", (str(tmp_path),))
+    if path is None:
+        monkeypatch.delenv("PATH", raising=False)
+    else:
+        monkeypatch.setenv("PATH", path)
+    cli._extend_path()
+    assert os.environ["PATH"] == str(tmp_path)  # no empty entry, which would mean "here"
+
+
+def test_extend_path_leaves_path_alone_when_nothing_is_missing(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "TOOL_DIRS", (str(tmp_path), str(tmp_path / "absent")))
+    monkeypatch.setenv("PATH", f"/usr/bin{os.pathsep}{tmp_path}")
+    cli._extend_path()
+    assert os.environ["PATH"] == f"/usr/bin{os.pathsep}{tmp_path}"
+
+
+def test_main_remote_extends_path_before_building_the_executor(monkeypatch, tmp_path, capsys):
+    seen = {}
+
+    def spy(runner):
+        seen["path"] = os.environ["PATH"]
+        return MacExecutor(runner)
+
+    async def fake_serve_stdio(executor, poller):
+        pass
+
+    monkeypatch.setattr(cli, "TOOL_DIRS", (str(tmp_path),))
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setattr(cli, "MacExecutor", spy)
+    monkeypatch.setattr(cli, "serve_stdio", fake_serve_stdio)
+    assert cli.main(["remote"]) == 0
+    assert seen["path"] == f"{tmp_path}{os.pathsep}/usr/bin"
+    assert capsys.readouterr().out == ""
+
+
 def test_deck_remote_writes_only_protocol_to_stdout(tmp_path):
-    """Run the real thing with an empty PATH, so no macOS tool exists: the state is empty."""
+    """Run the real thing with a PATH that has no tools (`deck remote` adds Homebrew's, which on
+    a Mac may exist, so the state is not asserted empty): stdout holds only protocol lines."""
     code = "import sys; from deck.cli import main; sys.exit(main(['remote']))"
     env = {**os.environ, "PATH": str(tmp_path)}
     proc = subprocess.Popen(
@@ -1037,7 +1100,8 @@ def test_deck_remote_writes_only_protocol_to_stdout(tmp_path):
     try:
         proc.stdin.write(b'{"hello": {"audio": {"inputs": [], "pin_input": false}}}\n')
         proc.stdin.flush()
-        assert json.loads(proc.stdout.readline()) == {"state": {}}
+        first = json.loads(proc.stdout.readline())
+        assert list(first) == ["state"] and isinstance(first["state"], dict)
         proc.stdin.close()
         rest, stderr = proc.stdout.read(), proc.stderr.read()
         assert proc.wait(timeout=20) == 0
