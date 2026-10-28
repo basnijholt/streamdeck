@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import logging
+import sys
 from contextlib import AsyncExitStack
 from datetime import UTC, datetime
 from pathlib import Path
@@ -11,6 +12,7 @@ from typing import Any
 
 from deck.actions import ActionRunner
 from deck.config import Config, ConfigError, load_config
+from deck.control import call, default_control_path
 from deck.daemon import Daemon
 from deck.device import StreamDeckDevice
 from deck.dials import Services
@@ -121,6 +123,33 @@ def _run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _control(message: dict[str, Any], pretty: bool = False) -> int:
+    """Send `message` to the running daemon, print its response; 0 if it said `ok`."""
+    path = default_control_path()
+    try:
+        response = asyncio.run(call(path, message))
+    except (FileNotFoundError, ConnectionRefusedError):
+        print(f"deck is not running (nothing is listening on {path})", file=sys.stderr)
+        return 1
+    except (OSError, ValueError) as exc:
+        print(f"deck: control socket {path}: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(response, indent=2 if pretty else None, default=str))
+    return 0 if response.get("ok") is True else 1
+
+
+def _reload(args: argparse.Namespace) -> int:
+    return _control({"cmd": "reload"})
+
+
+def _state(args: argparse.Namespace) -> int:
+    return _control({"cmd": "state"}, pretty=True)
+
+
+def _press(args: argparse.Namespace) -> int:
+    return _control({"cmd": "press", "page": args.page, "key": args.key, "long": args.long})
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="deck", description="Stream Deck + XL daemon")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -142,6 +171,18 @@ def main(argv: list[str] | None = None) -> int:
     run = sub.add_parser("run", help="run the daemon")
     run.add_argument("config", type=Path)
     run.set_defaults(func=_run)
+
+    reload = sub.add_parser("reload", help="make the running daemon reload its config")
+    reload.set_defaults(func=_reload)
+
+    state = sub.add_parser("state", help="print the running daemon's state as JSON")
+    state.set_defaults(func=_state)
+
+    press = sub.add_parser("press", help="press a key of the running daemon")
+    press.add_argument("page", help="page name")
+    press.add_argument("key", type=int, help="key index on that page")
+    press.add_argument("--long", action="store_true", help="long press")
+    press.set_defaults(func=_press)
 
     args = parser.parse_args(argv)
     return args.func(args)

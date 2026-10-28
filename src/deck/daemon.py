@@ -16,6 +16,7 @@ from typing import Any
 from PIL import Image
 
 from deck.config import Action, Config, ConfigError, KeySpec, Page, load_config
+from deck.control import close_control, default_control_path, serve_control
 from deck.device import SEGMENT_WIDTH, Device
 from deck.dials import DIAL_FACTORIES, DialHandler, Services
 from deck.events import (
@@ -60,9 +61,12 @@ class Daemon:
     `ConfigError` is raised by the constructor if the config is invalid at startup; later
     reloads keep the old config. Services are built once by `start` (which `run` calls) and
     follow reloads only through `services.config`: connections need a restart.
+
+    `run` also serves the control socket at `control_path` (default: `default_control_path()`).
     """
 
     services: Services  # set by start()
+    config_errors: list[str]  # why the last `reload` failed; empty if it succeeded
 
     def __init__(
         self,
@@ -70,8 +74,11 @@ class Daemon:
         device: Device,
         services_factory: ServicesFactory,
         clock: Callable[[], float] = time.monotonic,
+        control_path: Path | None = None,
     ) -> None:
         self._path = Path(config_path)
+        self._control_path = control_path if control_path is not None else default_control_path()
+        self.config_errors = []
         self._device = device
         self._services_factory = services_factory
         self._clock = clock
@@ -108,15 +115,18 @@ class Daemon:
         try:
             config = load_config(self._path)
         except ConfigError as exc:
+            self.config_errors = list(exc.errors)
             log.error(
                 "invalid config %s, keeping the previous one:\n%s",
                 self._path,
                 "\n".join(exc.errors),
             )
-        except Exception:
+        except Exception as exc:
+            self.config_errors = [f"cannot read {self._path}: {exc}"]
             log.exception("cannot read config %s, keeping the previous one", self._path)
         else:
             self._apply(config)
+            self.config_errors = []
             self._config_error = False
             self._dirty.set()
             log.info("loaded config %s", self._path)
@@ -195,6 +205,7 @@ class Daemon:
         """
         async with contextlib.AsyncExitStack() as stack:
             await self.start(stack)
+            await self._start_control(stack)
             background = [
                 asyncio.create_task(self._render_loop()),
                 asyncio.create_task(self._watch_config()),
@@ -210,6 +221,18 @@ class Daemon:
                 for task in tasks:
                     task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _start_control(self, stack: contextlib.AsyncExitStack) -> None:
+        """Serve the control socket until `stack` closes. Without it the deck still works."""
+        try:
+            server = await serve_control(self._control_path, self)
+        except OSError:
+            log.exception(
+                "cannot serve the control socket %s, `deck` commands will fail", self._control_path
+            )
+            return
+        stack.push_async_callback(close_control, server, self._control_path)
+        log.info("control socket %s", self._control_path)
 
     async def handle(self, event: Event) -> None:
         match event:
@@ -236,9 +259,16 @@ class Daemon:
     def _page(self) -> Page:
         return self.config.pages[self.current_page]
 
+    @staticmethod
+    def _key_spec(page: Page, index: int) -> KeySpec | None:
+        return page.keys[index] if 0 <= index < len(page.keys) else None
+
+    @staticmethod
+    def _key_action(spec: KeySpec, long: bool) -> Action | None:
+        return (spec.long_press if long else None) or spec.press
+
     def _key_down(self, index: int) -> None:
-        keys = self._page().keys
-        spec = keys[index] if 0 <= index < len(keys) else None
+        spec = self._key_spec(self._page(), index)
         if spec is None or (self._config_error and index == 0):
             return  # nothing to run, or the key is showing the config error
         self._down[index] = (self._clock(), spec, self.current_page)
@@ -248,10 +278,28 @@ class Daemon:
         if pressed is None:
             return
         since, spec, page = pressed
-        held_long = self._clock() - since >= LONG_PRESS_SECONDS
-        action = (spec.long_press if held_long else None) or spec.press
+        action = self._key_action(spec, self._clock() - since >= LONG_PRESS_SECONDS)
         if action is not None:
             self._spawn(self._run_action(index, page, action))
+
+    def press_key(self, page: str, index: int, long: bool = False) -> None:
+        """Press key `index` of `page` as the control socket asks, whichever page is showing.
+
+        The action runs like a physical press (a `long` one uses `long_press`, falling back
+        to `press`; a failure flashes the key if its page is showing) and the page on show
+        does not change unless the action is a `page` action. This returns once the action
+        has started, without waiting for it. Raises `LookupError` saying why, if there is no
+        such page, no key there or no action on it.
+        """
+        if page not in self.config.pages:
+            raise LookupError(f"unknown page {page!r}")
+        spec = self._key_spec(self.config.pages[page], index)
+        if spec is None:
+            raise LookupError(f"no key {index} on page {page!r}")
+        action = self._key_action(spec, long)
+        if action is None:
+            raise LookupError(f"key {index} on page {page!r} has no action")
+        self._spawn(self._run_action(index, page, action))
 
     async def _run_action(self, index: int, page: str, action: Action) -> None:
         try:
