@@ -936,7 +936,9 @@ async def test_services_without_a_token_log_an_error_and_keep_going(monkeypatch,
 
 async def test_services_with_an_invalid_url_log_an_error_and_keep_going(monkeypatch, caplog, store):
     monkeypatch.setenv("HA_TOKEN", "T")
-    config = _config(home_assistant={"url": "ha.local:8123", "token_env": "HA_TOKEN"})
+    config = _config(home_assistant={"url": "http://ha.local:8123", "token_env": "HA_TOKEN"})
+    # Config validation now rejects this URL; the services still defend against it.
+    config.home_assistant = config.home_assistant.model_copy(update={"url": "ha.local:8123"})
     with caplog.at_level(logging.ERROR):
         async with contextlib.AsyncExitStack() as stack:
             services = await cli._services(config, store, stack)

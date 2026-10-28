@@ -91,6 +91,54 @@ def test_mac_url_accepts_http_and_https(tmp_path):
     assert cfg.pages["home"].keys[1].press == Action(type="mac.url", args="https://a.example/x")
 
 
+T3_SERVER = {
+    "name": "pc",
+    "url": "http://127.0.0.1:3773",
+    "web_url": "https://t3.example",
+    "environment_id": "env",
+    "token_env": "T3_TOKEN",
+}
+
+
+def t3_section(*servers):
+    return {"servers": list(servers), "models": {}}
+
+
+@pytest.mark.parametrize("url", BAD_URLS)
+def test_home_assistant_url_rejects_non_http(tmp_path, url):
+    errs = errors_of(tmp_path, home(home_assistant={**HA, "url": url}))
+    assert any(err.startswith("home_assistant.url") for err in errs)
+
+
+@pytest.mark.parametrize("field", ["url", "web_url"])
+@pytest.mark.parametrize("url", BAD_URLS)
+def test_t3_server_urls_reject_non_http(tmp_path, field, url):
+    errs = errors_of(tmp_path, home(t3=t3_section({**T3_SERVER, field: url})))
+    assert any(err.startswith(f"t3.servers.0.{field}") for err in errs)
+
+
+def test_home_assistant_and_t3_urls_accept_http_and_https(tmp_path):
+    server = {**T3_SERVER, "url": "HTTP://127.0.0.1:3773", "web_url": "https://t3.example/x"}
+    ha = {**HA, "url": "https://ha.example"}
+    cfg = load_config(write(tmp_path, home(home_assistant=ha, t3=t3_section(server))))
+    assert cfg.home_assistant.url == "https://ha.example"
+    assert cfg.t3.servers[0].web_url == "https://t3.example/x"
+
+
+def test_duplicate_t3_server_names_rejected(tmp_path):
+    other = {**T3_SERVER, "name": "laptop"}
+    again = {**T3_SERVER, "url": "http://127.0.0.1:3774"}
+    errs = errors_of(tmp_path, home(t3=t3_section(T3_SERVER, other, again)))
+    assert len(errs) == 1
+    assert errs[0].startswith("t3.servers.2.name") and "'pc'" in errs[0]
+
+
+def test_distinct_t3_server_names_accepted(tmp_path):
+    other = {**T3_SERVER, "name": "laptop"}
+    cfg = load_config(write(tmp_path, home(t3=t3_section(T3_SERVER, other))))
+    assert [s.name for s in cfg.t3.servers] == ["pc", "laptop"]
+
+
 def test_too_many_keys_rejected(tmp_path):
     with pytest.raises(ConfigError):
         load_config(write(tmp_path, home(*[None] * 37)))

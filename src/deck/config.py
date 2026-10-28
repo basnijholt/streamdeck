@@ -180,14 +180,14 @@ class MacConfig(_Model):
 
 
 class HAConfig(_Model):
-    url: str
+    url: HttpUrl
     token_env: str
 
 
 class T3Server(_Model):
     name: str
-    url: str
-    web_url: str
+    url: HttpUrl
+    web_url: HttpUrl
     environment_id: str
     token_env: str
 
@@ -246,6 +246,13 @@ class Config(_Model):
 
         if self.start_page not in self.pages:
             report(("start_page",), f"unknown page {self.start_page!r}")
+
+        if self.t3 is not None:
+            names: set[str] = set()
+            for i, server in enumerate(self.t3.servers):
+                if server.name in names:
+                    report(("t3", "servers", i, "name"), f"duplicate server name {server.name!r}")
+                names.add(server.name)
 
         for page_name, page in self.pages.items():
             for i, key in enumerate(page.keys):
