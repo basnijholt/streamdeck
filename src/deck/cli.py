@@ -19,6 +19,8 @@ from deck.ddc import Ddc
 from deck.device import StreamDeckDevice
 from deck.dials import Services
 from deck.local import register_local_actions
+from deck.remote.mac import MacExecutor, MacPoller
+from deck.remote.server import serve_stdio
 from deck.render import compose_deck, draw_key, draw_segment
 from deck.runner import Runner
 from deck.state import StateStore
@@ -144,6 +146,21 @@ def _run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _remote(args: argparse.Namespace) -> int:
+    """Serve the PC's JSON Lines protocol on stdin/stdout (run by its SSH forced command)."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        stream=sys.stderr,  # stdout carries the protocol and nothing else
+    )
+    executor = MacExecutor(Runner())
+    try:
+        asyncio.run(serve_stdio(executor, MacPoller(Runner(), executor)))
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
 def _control(message: dict[str, Any], pretty: bool = False) -> int:
     """Send `message` to the running daemon, print its response; 0 if it said `ok`."""
     path = default_control_path()
@@ -192,6 +209,9 @@ def main(argv: list[str] | None = None) -> int:
     run = sub.add_parser("run", help="run the daemon")
     run.add_argument("config", type=Path)
     run.set_defaults(func=_run)
+
+    remote = sub.add_parser("remote", help="serve Mac actions and state over stdin/stdout")
+    remote.set_defaults(func=_remote)
 
     reload = sub.add_parser("reload", help="make the running daemon reload its config")
     reload.set_defaults(func=_reload)
