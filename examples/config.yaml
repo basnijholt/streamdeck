@@ -1,0 +1,38 @@
+mac:
+  host: macbook-m5
+  key: ~/.config/deck/mac_ed25519
+home_assistant:
+  url: http://192.168.1.178:8123
+  token_env: HA_TOKEN
+t3:
+  servers:
+    - name: pc
+      url: http://127.0.0.1:3773        # used by the daemon on the PC
+      web_url: https://t3.lab.nijho.lt  # the Brave tab on the Mac (proxied to :3773)
+      environment_id: 6cd1637d-2c2f-4fa6-8cd2-fa04748043e2  # ~/.t3/userdata/environment-id
+      token_env: T3_TOKEN
+  models:
+    claudeAgent: [claude-opus-5-5, claude-sonnet-5-5, claude-haiku-5-5]
+  efforts: [low, medium, high, xhigh, max]
+ddc:
+  model: DELL U4025QW
+audio:
+  outputs:
+    - {name: iLoud, match: iloud, bt: "00-11-22-33-44-55"}
+    - {name: AirPods, match: airpods, bt: "00-11-22-33-44-55"}
+    - {name: MacBook, match: macbook}
+  inputs: [q9, brio, macbook]     # preferred order; AirPods never auto-picked
+  pin_input: false
+pages:
+  home:
+    keys:
+      - {icon: "👻", label: Ghostty, press: {mac.app: Ghostty}}
+      - {icon: "📬", label: Gmail, press: {mac.tab: {match: mail.google.com, url: "https://mail.google.com"}}}
+      - icon: "💡"
+        label: Guest
+        state: {ha: light.guest_room}
+        press: {ha: {service: light.toggle, entity_id: light.guest_room}}
+      - {t3.slot: 0}
+    dials:
+      - {kind: brightness}
+      - {kind: t3.effort}
