@@ -223,7 +223,7 @@ def test_parse_volume_settings():
 
 
 def test_parse_idle():
-    assert parse_idle(IDLE_OUT) == 4  # whole seconds, rounded down
+    assert parse_idle(IDLE_OUT) == 4500  # whole milliseconds
     with pytest.raises(ValueError):
         parse_idle("+-o IOHIDSystem\n")
 
@@ -734,7 +734,7 @@ async def test_poller_parses_snapshot(poller, runner):
         "mic.muted": False,
         "volume": 42,
         "bt.connected": [BT],
-        "idle": 4,
+        "idle_ms": 4500,
     }
 
 
@@ -784,7 +784,7 @@ async def test_poller_leaves_out_keys_whose_query_failed(poller, runner):
         (LIST_OUTPUTS, '{"nope": 1}', {"audio.outputs"}),
         (GET_VOLUME_SETTINGS, "garbage", {"volume", "mic.muted"}),
         (BT_CONNECTED, '{"address": "x"}', {"bt.connected"}),
-        (IDLE_ARGV, "+-o IOHIDSystem\n", {"idle"}),
+        (IDLE_ARGV, "+-o IOHIDSystem\n", {"idle_ms"}),
     ],
 )
 async def test_poller_tolerates_unparseable_output(poller, runner, argv, garbage, gone):
@@ -816,18 +816,20 @@ async def test_poller_volume_is_left_out_without_software_volume(poller, runner)
     assert "volume" not in snapshot and snapshot["mic.muted"] is False
 
 
-async def test_poller_reports_idle_in_whole_seconds(poller, runner):
-    out = '    "HIDIdleTime" = 999999999\n'
+@pytest.mark.parametrize(
+    ("nanoseconds", "expected"),
+    [(4500000000, 4500), (999999, 0), (1999999, 1), (0, 0)],  # whole ms, rounded down
+)
+async def test_poller_reports_idle_in_whole_milliseconds(poller, runner, nanoseconds, expected):
+    out = f'    "HIDIdleTime" = {nanoseconds}\n'
     script_snapshot(runner, {tuple(IDLE_ARGV): Result(0, out, "")})
-    assert (await poller.snapshot())["idle"] == 0
-    script_snapshot(runner, {tuple(IDLE_ARGV): Result(0, '"HIDIdleTime" = 0\n', "")})
-    assert (await poller.snapshot())["idle"] == 0
+    assert (await poller.snapshot())["idle_ms"] == expected
 
 
-async def test_poller_without_idle_when_ioreg_fails(poller, runner):
+async def test_poller_without_idle_ms_when_ioreg_fails(poller, runner):
     script_snapshot(runner, {tuple(IDLE_ARGV): Result(1, "", "ioreg: boom")})
     snapshot = await poller.snapshot()
-    assert "idle" not in snapshot
+    assert "idle_ms" not in snapshot
     assert snapshot["volume"] == 42
 
 

@@ -225,11 +225,11 @@ def parse_volume_settings(out: str) -> dict[str, str]:
 
 
 def parse_idle(out: str) -> int:
-    """`ioreg` output holding `"HIDIdleTime" = <nanoseconds>` as whole seconds."""
+    """`ioreg` output holding `"HIDIdleTime" = <nanoseconds>` as whole milliseconds."""
     match = re.search(r'"HIDIdleTime" = (\d+)', out)
     if match is None:
         raise ValueError("no HIDIdleTime in the ioreg output")
-    return int(match[1]) // 1_000_000_000
+    return int(match[1]) // 1_000_000
 
 
 def _percent(value: str | None) -> int | None:
@@ -492,7 +492,7 @@ class MacPoller(Poller):
 
     async def snapshot(self) -> dict[str, Any]:
         """The current state; a key whose query failed is left out. Values are fresh each call."""
-        output, input_, outputs, inputs, settings, bt, idle = await asyncio.gather(
+        output, input_, outputs, inputs, settings, bt, idle_ms = await asyncio.gather(
             self._query(current_device_argv("output"), parse_current_device),
             self._query(current_device_argv("input"), parse_current_device),
             self._query(list_devices_argv("output"), parse_device_names),
@@ -523,8 +523,8 @@ class MacPoller(Poller):
                 state["mic.muted"] = level == 0
         if bt is not None:
             state["bt.connected"] = list(bt)
-        if idle is not None:
-            state["idle"] = idle
+        if idle_ms is not None:
+            state["idle_ms"] = idle_ms
         return state
 
     async def _query[T](self, argv: list[str], parse: Callable[[str], T]) -> T | None:
