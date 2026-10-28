@@ -12,13 +12,15 @@ from pathlib import Path
 from typing import Any
 
 from deck.actions import ActionRunner
-from deck.config import Config, ConfigError, load_config
+from deck.config import Action, Config, ConfigError, load_config
 from deck.control import call, default_control_path
 from deck.daemon import Daemon
 from deck.ddc import Ddc
 from deck.device import StreamDeckDevice
 from deck.dials import Services
 from deck.local import register_local_actions
+from deck.mac import dials as _mac_dials  # noqa: F401  (registers the volume and input dials)
+from deck.mac.client import MacClient, handle_mac_action
 from deck.remote.mac import MacExecutor, MacPoller
 from deck.remote.server import serve_stdio
 from deck.render import compose_deck, draw_key, draw_segment
@@ -127,6 +129,14 @@ async def _services(config: Config, store: StateStore, stack: AsyncExitStack) ->
     if config.ddc is not None:
         services.ddc = Ddc(runner, config.ddc.model, store)
         _start_background(stack, services.ddc.poll_forever())
+    if config.mac is not None:
+        mac = services.mac = MacClient(config.mac, lambda: services.config.audio, store)
+        _start_background(stack, mac.run())
+
+        async def mac_action(action: Action) -> None:
+            await handle_mac_action(mac, services.config.audio, action)
+
+        services.actions.register("mac.", mac_action)
     return services
 
 

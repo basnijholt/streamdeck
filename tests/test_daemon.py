@@ -937,8 +937,16 @@ def test_run_builds_daemon_with_deck_and_services(monkeypatch, config_path):
         async def run(self) -> None:
             created["ran"] = True
 
+    class StubMacClient:
+        def __init__(self, cfg, audio, store) -> None:
+            pass
+
+        async def run(self) -> None:  # the real one would start ssh
+            await asyncio.Event().wait()
+
     monkeypatch.setattr(cli, "Daemon", StubDaemon)
     monkeypatch.setattr(cli, "StreamDeckDevice", FakeDeck)
+    monkeypatch.setattr(cli, "MacClient", StubMacClient)
     assert main(["run", str(config_path)]) == 0
     assert created["ran"] is True
     assert created["path"] == config_path
@@ -950,4 +958,5 @@ def test_run_builds_daemon_with_deck_and_services(monkeypatch, config_path):
     assert isinstance(services, Services)
     assert (services.store, services.config) == (store, config)
     assert isinstance(services.actions, ActionRunner)
-    assert (services.ddc, services.mac, services.ha, services.t3) == (None, None, None, None)
+    assert isinstance(services.mac, StubMacClient)  # the config has a mac section
+    assert (services.ddc, services.ha, services.t3) == (None, None, None)
