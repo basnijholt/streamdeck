@@ -90,8 +90,8 @@ pages:
     keys:
       - {icon: "🛋️", label: Living, press: {ha: {service: scene.turn_on, entity_id: scene.living}}}
       - {icon: "🎮", label: Sunshine, press: {shell: [systemctl, --user, start, sunshine]}}
-      - {icon: "🔁", label: Dell input, press: {ddc: {code: 0x60, value: 0x0f}}}
-      - null
+      - {icon: "🐧", label: Show PC, press: {ddc: {code: 0x60, value: 0x0f}}}   # DisplayPort-1
+      - {icon: "🍎", label: Show Mac, press: {ddc: {code: 0x60, value: 0x19}}}  # Thunderbolt
       - null
       - null
       - null
