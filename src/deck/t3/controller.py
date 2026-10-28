@@ -368,7 +368,8 @@ class _ThreadDial:
             if selection is None:
                 self._message(self._unavailable(current.instance_id))
                 return
-            await source.set_model_selection(capture.thread_id, selection)
+            if selection != current:  # a set bumps `updatedAt` and so reorders the slots
+                await source.set_model_selection(capture.thread_id, selection)
         self._cancel_timer()
         self._reset()
 

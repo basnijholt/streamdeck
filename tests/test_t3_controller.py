@@ -681,6 +681,31 @@ async def test_successful_apply_clears_the_pending_and_the_next_turn_reads_again
     assert mac.reads == 3 and pending(store) == Pending("Second", "xhigh", "high")
 
 
+async def test_press_that_changes_nothing_sets_nothing(ctrl, mac, source, store, effort):
+    mac.active_urls = [url_of(T1), url_of(T1)]
+    await effort.on_turn(+1)
+    await effort.on_turn(-1)  # back on the thread's own value
+    await effort.on_press()
+    assert source.calls == []  # a set would bump `updatedAt` and reorder the slots
+    assert mac.reads == 2 and source.reads == [T1.thread_id]
+    assert pending(store) is None
+    await effort.on_press()  # nothing is pending any more
+    assert source.calls == []
+
+
+async def test_press_whose_value_the_thread_already_has_sets_nothing(
+    ctrl, mac, source, store, model
+):
+    # another client moved the thread to the pending model meanwhile
+    source.selections[T1.thread_id] = selection(T1, model="claude-sonnet-5-5")
+    mac.active_urls = [url_of(T1), url_of(T1)]
+    await model.on_turn(+1)
+    assert pending(store, "model") == Pending("First", "claude-opus-5-5", "claude-sonnet-5-5")
+    await model.on_press()
+    assert source.calls == []
+    assert pending(store, "model") is None
+
+
 async def test_a_second_press_while_applying_is_ignored(ctrl, mac, source, store, effort):
     gate = asyncio.Event()
     mac.active_urls = [url_of(T1), url_of(T1)]
