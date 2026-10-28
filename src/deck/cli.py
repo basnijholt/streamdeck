@@ -1,12 +1,18 @@
 """Command line entry point: `deck <subcommand>`."""
 
 import argparse
+import asyncio
 import json
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from deck.actions import ActionRunner
 from deck.config import Config, ConfigError, load_config
+from deck.daemon import Daemon
+from deck.device import StreamDeckDevice
+from deck.dials import Services
 from deck.render import compose_deck, draw_key, draw_segment
 from deck.state import StateStore
 from deck.t3.model import Thread, visible_threads
@@ -93,6 +99,26 @@ def _render(args: argparse.Namespace) -> int:
     return 0
 
 
+def _services(config: Config, store: StateStore) -> Services:
+    return Services(store, config, actions=ActionRunner())
+
+
+def _run(args: argparse.Namespace) -> int:
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
+    try:
+        daemon = Daemon(args.config, StreamDeckDevice(), _services)
+    except ConfigError as exc:
+        print("\n".join(exc.errors))
+        return 1
+    try:
+        asyncio.run(daemon.run())
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="deck", description="Stream Deck + XL daemon")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -110,6 +136,10 @@ def main(argv: list[str] | None = None) -> int:
     render.add_argument("--page", help="page name (default: the config's start_page)")
     render.add_argument("--state", type=Path, help="JSON state file")
     render.set_defaults(func=_render)
+
+    run = sub.add_parser("run", help="run the daemon")
+    run.add_argument("config", type=Path)
+    run.set_defaults(func=_run)
 
     args = parser.parse_args(argv)
     return args.func(args)
