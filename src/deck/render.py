@@ -5,6 +5,7 @@ Nothing here touches the device or the network; the only I/O is font lookup.
 
 import os
 import subprocess
+import unicodedata
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
@@ -161,6 +162,24 @@ def _icon_image(icon: str, size: int) -> Image.Image:
     return canvas.crop(canvas.getbbox() or (0, 0, 1, 1))
 
 
+def _is_emoji(text: str) -> bool:
+    """True for a lone emoji ("🚫", "❌", "☀️"): symbols only, no letters, digits or spaces."""
+    symbols = [c for c in text if c not in "\ufe0f\u200d"]  # variation selector, joiner
+    return bool(symbols) and all(unicodedata.category(c) in {"So", "Sk"} for c in symbols)
+
+
+def _emoji_layer(text: str, size: int) -> Image.Image | None:
+    """Emoji image for a lone-emoji `text`; None means draw it as plain text instead.
+
+    The text font has no emoji glyphs (they come out as boxes), so every place that
+    can show a bare emoji asks here first. Without an emoji font there is nothing
+    better than the text fallback, so this also returns None.
+    """
+    if _emoji_font() is None or not _is_emoji(text):
+        return None
+    return _icon_image(text, size)
+
+
 def _paste_centered(img: Image.Image, layer: Image.Image, center: tuple[int, int]) -> None:
     img.paste(layer, (center[0] - layer.width // 2, center[1] - layer.height // 2), layer)
 
@@ -192,18 +211,27 @@ def draw_key(view: KeyView) -> Image.Image:
         text = _ellipsize(draw, _plain(view.sublabel), font, max_text)
         draw.text((KEY_SIZE // 2, 98), text, font=font, fill=_rgb(MUTED_COLOR), anchor="mm")
     if view.badge:
-        _draw_badge(draw, view.badge)
+        _draw_badge(img, draw, view.badge)
 
     if view.dim:
         img = img.point(lambda v: int(v * DIM_FACTOR))
     return img
 
 
-def _draw_badge(draw: ImageDraw.ImageDraw, badge: str) -> None:
+BADGE_EMOJI_SIZE = 20
+
+
+def _draw_badge(img: Image.Image, draw: ImageDraw.ImageDraw, badge: str) -> None:
+    right, top = KEY_SIZE - BORDER_WIDTH - 3, BORDER_WIDTH + 3
+    emoji = _emoji_layer(badge, BADGE_EMOJI_SIZE)
+    if emoji is not None:
+        # An emoji is its own badge: a red pill behind it would hide a red 🚫.
+        img.paste(emoji, (right - emoji.width, top + (BADGE_EMOJI_SIZE - emoji.height) // 2), emoji)
+        return
     font = _text_font(12)
     text = _plain(badge)
     width = max(18, round(draw.textlength(text, font=font)) + 10)
-    right, top, height = KEY_SIZE - BORDER_WIDTH - 3, BORDER_WIDTH + 3, 18
+    height = 18
     draw.rounded_rectangle(
         (right - width, top, right, top + height), radius=height // 2, fill=_rgb(BADGE_COLOR)
     )
@@ -213,6 +241,9 @@ def _draw_badge(draw: ImageDraw.ImageDraw, badge: str) -> None:
 
 
 # --- segment ----------------------------------------------------------------
+
+
+VALUE_EMOJI_SIZE = 30
 
 
 def draw_segment(view: SegmentView) -> Image.Image:
@@ -225,7 +256,11 @@ def draw_segment(view: SegmentView) -> Image.Image:
     title_font = _text_font(16)
     x = pad
     head, _, rest = view.title.partition(" ")
-    if rest and not head.isascii():
+    title_emoji = _emoji_layer(view.title, 20)
+    if title_emoji is not None:
+        img.paste(title_emoji, (x, 10 + (20 - title_emoji.height) // 2), title_emoji)
+        title = ""
+    elif rest and not head.isascii():
         icon = _icon_image(head, 20)
         img.paste(icon, (x, 10 + (20 - icon.height) // 2), icon)
         x += icon.width + 6
@@ -235,9 +270,13 @@ def draw_segment(view: SegmentView) -> Image.Image:
     title = _ellipsize(draw, _plain(title), title_font, width - pad - x)
     draw.text((x, 20), title, font=title_font, fill=_rgb(MUTED_COLOR), anchor="lm")
 
-    value_font = _text_font(30)
-    value = _ellipsize(draw, _plain(view.value), value_font, max_text)
-    draw.text((pad, 52), value, font=value_font, fill=_rgb(TEXT_COLOR), anchor="lm")
+    value_emoji = _emoji_layer(view.value, VALUE_EMOJI_SIZE)
+    if value_emoji is not None:
+        img.paste(value_emoji, (pad, 52 - value_emoji.height // 2), value_emoji)
+    else:
+        value_font = _text_font(30)
+        value = _ellipsize(draw, _plain(view.value), value_font, max_text)
+        draw.text((pad, 52), value, font=value_font, fill=_rgb(TEXT_COLOR), anchor="lm")
 
     if view.bar is not None:
         fraction = min(1.0, max(0.0, view.bar))
