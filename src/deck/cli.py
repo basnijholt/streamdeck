@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import sys
 from collections.abc import Coroutine
 from contextlib import AsyncExitStack
@@ -12,12 +13,13 @@ from pathlib import Path
 from typing import Any
 
 from deck.actions import ActionRunner
-from deck.config import Action, Config, ConfigError, load_config
+from deck.config import Action, Config, ConfigError, HAConfig, load_config
 from deck.control import call, default_control_path
 from deck.daemon import Daemon
 from deck.ddc import Ddc
 from deck.device import StreamDeckDevice
 from deck.dials import Services
+from deck.ha import HomeAssistant, entities_in
 from deck.local import register_local_actions
 from deck.mac import dials as _mac_dials  # noqa: F401  (registers the volume and input dials)
 from deck.mac.client import MacClient, handle_mac_action
@@ -28,6 +30,8 @@ from deck.runner import Runner
 from deck.state import StateStore
 from deck.t3.model import Thread, visible_threads
 from deck.views import key_view, segment_view
+
+log = logging.getLogger(__name__)
 
 _THREAD_DEFAULTS: dict[str, Any] = {
     "server": "pc",
@@ -121,6 +125,36 @@ def _start_background(stack: AsyncExitStack, coro: Coroutine[Any, Any, None]) ->
     stack.push_async_callback(stop)
 
 
+def _start_home_assistant(
+    cfg: HAConfig, services: Services, store: StateStore, stack: AsyncExitStack
+) -> None:
+    """Start the Home Assistant client and register its actions.
+
+    Without a usable token or URL the daemon keeps running: Home Assistant stays offline, its
+    keys are dimmed and its actions fail with a message.
+    """
+    store.set("ha.online", False)
+    token = os.environ.get(cfg.token_env, "").strip()
+    if not token:
+        log.error("Home Assistant is disabled: environment variable %s is not set", cfg.token_env)
+    else:
+        try:
+            ha = HomeAssistant(cfg, token, store, lambda: entities_in(services.config))
+        except ValueError as exc:
+            log.error("Home Assistant is disabled: %s", exc)
+        else:
+            services.ha = ha
+            _start_background(stack, ha.run())
+
+    async def ha_action(action: Action) -> None:
+        if services.ha is None:
+            raise RuntimeError("Home Assistant is disabled (see the error logged at startup)")
+        args = action.args
+        await services.ha.call_service(args.service, args.entity_id, args.data)
+
+    services.actions.register("ha", ha_action)
+
+
 async def _services(config: Config, store: StateStore, stack: AsyncExitStack) -> Services:
     """Build the services. Later tasks start their clients here and register cleanup on `stack`."""
     services = Services(store, config, actions=ActionRunner())
@@ -137,6 +171,8 @@ async def _services(config: Config, store: StateStore, stack: AsyncExitStack) ->
             await handle_mac_action(mac, services.config.audio, action)
 
         services.actions.register("mac.", mac_action)
+    if config.home_assistant is not None:
+        _start_home_assistant(config.home_assistant, services, store, stack)
     return services
 
 
