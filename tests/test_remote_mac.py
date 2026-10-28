@@ -13,6 +13,7 @@ from deck import cli
 from deck.remote.mac import (
     ACTIVE_URL_SCRIPT,
     BRAVE_TAB_SCRIPT,
+    IDLE_ARGV,
     INPUT_VOLUME_SCRIPT,
     KM_SCRIPT,
     VOLUME_MUTE_SCRIPT,
@@ -24,6 +25,7 @@ from deck.remote.mac import (
     input_volume_argv,
     km_argv,
     lock_argv,
+    parse_idle,
     parse_volume_settings,
     screenshot_argv,
     tab_argv,
@@ -44,6 +46,7 @@ GET_INPUT_VOLUME = ["osascript", "-e", "input volume of (get volume settings)"]
 GET_VOLUME_SETTINGS = ["osascript", "-e", "get volume settings"]
 ILOUD = {"name": "iLoud", "match": "iloud", "bt": BT}
 SETTINGS = "output volume:42, input volume:75, alert volume:100, output muted:false\n"
+IDLE_OUT = '+-o IOHIDSystem  <class IOHIDSystem>\n    "HIDIdleTime" = 4500000000\n'
 
 
 def device(name: str, kind: str = "output") -> str:
@@ -217,6 +220,12 @@ def test_parse_volume_settings():
     }
     with pytest.raises(ValueError):
         parse_volume_settings("no colons here")
+
+
+def test_parse_idle():
+    assert parse_idle(IDLE_OUT) == 4  # whole seconds, rounded down
+    with pytest.raises(ValueError):
+        parse_idle("+-o IOHIDSystem\n")
 
 
 # --- executor: simple kinds -------------------------------------------------
@@ -704,6 +713,7 @@ def script_snapshot(
         tuple(LIST_INPUTS): lines(*[device(i, "input") for i in inputs]),
         tuple(GET_VOLUME_SETTINGS): Result(0, SETTINGS, ""),
         tuple(BT_CONNECTED): Result(0, json.dumps([{"address": BT, "name": "iLoud"}]), ""),
+        tuple(IDLE_ARGV): Result(0, IDLE_OUT, ""),
         **(replace or {}),
     }
     for argv, result in results.items():
@@ -724,6 +734,7 @@ async def test_poller_parses_snapshot(poller, runner):
         "mic.muted": False,
         "volume": 42,
         "bt.connected": [BT],
+        "idle": 4,
     }
 
 
@@ -773,13 +784,14 @@ async def test_poller_leaves_out_keys_whose_query_failed(poller, runner):
         (LIST_OUTPUTS, '{"nope": 1}', {"audio.outputs"}),
         (GET_VOLUME_SETTINGS, "garbage", {"volume", "mic.muted"}),
         (BT_CONNECTED, '{"address": "x"}', {"bt.connected"}),
+        (IDLE_ARGV, "+-o IOHIDSystem\n", {"idle"}),
     ],
 )
 async def test_poller_tolerates_unparseable_output(poller, runner, argv, garbage, gone):
     script_snapshot(runner, {tuple(argv): Result(0, garbage, "")})
     snapshot = await poller.snapshot()
     assert not gone & snapshot.keys()
-    assert len(snapshot) == 7 - len(gone)
+    assert len(snapshot) == 8 - len(gone)
 
 
 async def test_poller_with_everything_failing_is_empty(poller, runner):
@@ -790,6 +802,7 @@ async def test_poller_with_everything_failing_is_empty(poller, runner):
         LIST_INPUTS,
         GET_VOLUME_SETTINGS,
         BT_CONNECTED,
+        IDLE_ARGV,
     ):
         runner.script(argv, Result(-1, "", f"{argv[0]}: No such file or directory"))
     assert await poller.snapshot() == {}
@@ -803,10 +816,25 @@ async def test_poller_volume_is_left_out_without_software_volume(poller, runner)
     assert "volume" not in snapshot and snapshot["mic.muted"] is False
 
 
+async def test_poller_reports_idle_in_whole_seconds(poller, runner):
+    out = '    "HIDIdleTime" = 999999999\n'
+    script_snapshot(runner, {tuple(IDLE_ARGV): Result(0, out, "")})
+    assert (await poller.snapshot())["idle"] == 0
+    script_snapshot(runner, {tuple(IDLE_ARGV): Result(0, '"HIDIdleTime" = 0\n', "")})
+    assert (await poller.snapshot())["idle"] == 0
+
+
+async def test_poller_without_idle_when_ioreg_fails(poller, runner):
+    script_snapshot(runner, {tuple(IDLE_ARGV): Result(1, "", "ioreg: boom")})
+    snapshot = await poller.snapshot()
+    assert "idle" not in snapshot
+    assert snapshot["volume"] == 42
+
+
 async def test_poller_polls_with_timeouts(executor):
     timed = TimeoutRunner()
     await MacPoller(timed, executor).snapshot()
-    assert len(timed.timeouts) == 6 and all(0 < t <= 10 for t in timed.timeouts)
+    assert len(timed.timeouts) == 7 and all(0 < t <= 10 for t in timed.timeouts)
 
 
 # --- pin_input --------------------------------------------------------------

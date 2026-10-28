@@ -3,9 +3,9 @@
 Every command goes through a `Runner` as an argv list: no shell, and AppleScript gets its
 arguments through `on run argv`, never spliced into script text. `MacExecutor` checks the
 typed arguments of each kind itself (the server only re-checks URLs); `MacPoller` reads the
-audio, volume and Bluetooth state, and tolerates any single query failing.
+audio, volume, Bluetooth and idle state, and tolerates any single query failing.
 
-macOS tools used: `open`, `osascript`, `screencapture`, `pmset`, `SwitchAudioSource`
+macOS tools used: `open`, `osascript`, `screencapture`, `pmset`, `ioreg`, `SwitchAudioSource`
 (brew switchaudio-osx >= 1.2, for `-f json`) and `blueutil`. stdout belongs to the protocol,
 so nothing here prints.
 """
@@ -170,6 +170,7 @@ def current_device_argv(kind: str) -> list[str]:
 
 
 BT_CONNECTED = ["blueutil", "--connected", "--format", "json"]
+IDLE_ARGV = ["ioreg", "-c", "IOHIDSystem", "-d", "4", "-r", "-k", "HIDIdleTime"]
 
 # --- parsing ----------------------------------------------------------------
 
@@ -221,6 +222,14 @@ def parse_volume_settings(out: str) -> dict[str, str]:
             raise ValueError(f"unexpected volume settings: {out.strip()!r}")
         settings[key.strip()] = value.strip()
     return settings
+
+
+def parse_idle(out: str) -> int:
+    """`ioreg` output holding `"HIDIdleTime" = <nanoseconds>` as whole seconds."""
+    match = re.search(r'"HIDIdleTime" = (\d+)', out)
+    if match is None:
+        raise ValueError("no HIDIdleTime in the ioreg output")
+    return int(match[1]) // 1_000_000_000
 
 
 def _percent(value: str | None) -> int | None:
@@ -473,7 +482,7 @@ class MacExecutor(Executor):
 
 
 class MacPoller(Poller):
-    """Reads the Mac's audio, volume and Bluetooth state."""
+    """Reads the Mac's audio, volume, Bluetooth and idle state."""
 
     def __init__(self, runner: Runner, executor: MacExecutor) -> None:
         self._runner = runner
@@ -483,13 +492,14 @@ class MacPoller(Poller):
 
     async def snapshot(self) -> dict[str, Any]:
         """The current state; a key whose query failed is left out. Values are fresh each call."""
-        output, input_, outputs, inputs, settings, bt = await asyncio.gather(
+        output, input_, outputs, inputs, settings, bt, idle = await asyncio.gather(
             self._query(current_device_argv("output"), parse_current_device),
             self._query(current_device_argv("input"), parse_current_device),
             self._query(list_devices_argv("output"), parse_device_names),
             self._query(list_devices_argv("input"), parse_device_names),
             self._query(GET_VOLUME_SETTINGS, parse_volume_settings),
             self._query(BT_CONNECTED, parse_bt_addresses),
+            self._query(IDLE_ARGV, parse_idle),
         )
         if input_ is not None and inputs is not None:
             input_ = await self._pin_input(input_, inputs)
@@ -513,6 +523,8 @@ class MacPoller(Poller):
                 state["mic.muted"] = level == 0
         if bt is not None:
             state["bt.connected"] = list(bt)
+        if idle is not None:
+            state["idle"] = idle
         return state
 
     async def _query[T](self, argv: list[str], parse: Callable[[str], T]) -> T | None:
