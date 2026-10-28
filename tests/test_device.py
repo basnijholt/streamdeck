@@ -373,19 +373,28 @@ async def test_set_key_pushes_native_key_jpeg():
     await stream.aclose()
 
 
-async def test_set_segment_draws_a_200x100_jpeg_at_its_slot():
+async def test_set_segment_redraws_the_whole_strip():
     deck = StubDeck()
     device = make_device(deck)
     stream = device.events()
     await next_event(stream)
 
+    device.set_segment(0, Image.new("RGB", (200, 100), (0, 0, 255)))
     device.set_segment(3, red((200, 100)))
 
-    [(data, geometry)] = deck.touch_images
-    assert geometry == {"x_pos": 600, "y_pos": 0, "width": 200, "height": 100}
+    data, geometry = deck.touch_images[-1]
+    assert geometry == {"x_pos": 0, "y_pos": 0, "width": 1200, "height": 100}
     native = Image.open(io.BytesIO(data))
     assert native.format == "JPEG"
-    assert native.size == (100, 200)  # rotated 90 degrees for the panel
+    assert native.size == (100, 1200)  # rotated 90 degrees for the panel
+    strip = native.rotate(-90, expand=True).convert("RGB")  # back to 1200x100
+    assert strip.size == (1200, 100)
+    r, g, b = strip.getpixel((100, 50))  # segment 0 kept its blue
+    assert b > 200 and r < 60
+    r, g, b = strip.getpixel((700, 50))  # segment 3 is red
+    assert r > 200 and b < 60
+    r, g, b = strip.getpixel((300, 50))  # segment 1 was never drawn
+    assert max(r, g, b) < 40
     await stream.aclose()
 
 

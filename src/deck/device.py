@@ -105,6 +105,7 @@ class StreamDeckDevice(Device):
         self._sleep = sleep
         self._poll_interval = poll_interval
         self._deck: Any | None = None  # the open library deck, None while disconnected
+        self._strip = Image.new("RGB", (SEGMENT_WIDTH * DIAL_COUNT, SEGMENT_HEIGHT))
 
     def set_key(self, index: int, image: Image.Image) -> None:
         deck = self._deck
@@ -117,17 +118,20 @@ class StreamDeckDevice(Device):
             )
 
     def set_segment(self, index: int, image: Image.Image) -> None:
+        # The + XL draws a partial touchscreen image only at x 0 (whatever x_pos says), so
+        # every segment landed on the first one. Keep the whole strip and always send all of it.
+        self._strip.paste(image, (index * SEGMENT_WIDTH, 0))
         deck = self._deck
         if deck is not None:
-            jpeg = PILHelper.to_native_touchscreen_format(deck, image)
+            jpeg = PILHelper.to_native_touchscreen_format(deck, self._strip)
             self._write(
                 deck,
                 deck.set_touchscreen_image,
                 jpeg,
-                x_pos=index * SEGMENT_WIDTH,
+                x_pos=0,
                 y_pos=0,
-                width=SEGMENT_WIDTH,
-                height=SEGMENT_HEIGHT,
+                width=self._strip.width,
+                height=self._strip.height,
             )
 
     def set_brightness(self, pct: int) -> None:
