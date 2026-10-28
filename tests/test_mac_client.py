@@ -354,6 +354,19 @@ def test_asyncio_run_ending_while_the_child_starts_does_not_hang(state_file, sto
     gc.collect()  # asyncio leaves the pipes of a spawn cancelled this early unclosed
 
 
+async def test_a_second_cancel_while_the_child_starts_still_leaves_no_child(
+    state_file, store, fake_sleep
+):
+    client = MacClient(mac_config(stub_command(state_file)), None, store, sleep=fake_sleep)
+    task = asyncio.create_task(client.run())
+    await asyncio.sleep(0)  # the child is being started
+    task.cancel()
+    await asyncio.sleep(0)  # the cancelled run waits for the spawn to finish
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    await eventually(lambda: processes_running(str(state_file)) == [])  # the spawn's child dies
+
+
 async def test_a_child_that_ignores_sigterm_is_killed(monkeypatch, state_file, store, fake_sleep):
     monkeypatch.setattr(client_module, "TERMINATE_GRACE", 0.2)
     cfg = mac_config(stub_command(state_file, "--stubborn"))
@@ -537,6 +550,71 @@ async def test_volume_press_toggles_mute(store):
     assert mac.requests == [("volume", {"mute": "toggle"})]
 
 
+async def test_volume_turn_in_flight_steps_from_the_target_not_a_stale_push(store):
+    mac = FakeMac()
+    mac.block = asyncio.Event()
+    store.set("mac.volume", 40)
+    dial = volume_dial(make_services(store, mac))
+    await dial.on_turn(1)  # 42, now in flight
+    store.set("mac.volume", 40)  # a push still carrying the level from before the spin
+    await dial.on_turn(1)
+    assert store.get("mac.volume") == 44  # not 42: no tick is lost
+    mac.block.set()
+    await settle()
+    assert mac.requests == [("volume", 42), ("volume", 44)]
+
+
+async def test_volume_turn_after_the_sends_steps_from_the_store_again(store):
+    mac = FakeMac()
+    store.set("mac.volume", 40)
+    dial = volume_dial(make_services(store, mac))
+    await dial.on_turn(1)
+    await settle()
+    store.set("mac.volume", 10)  # the Mac's real level, however it got there
+    await dial.on_turn(1)
+    assert store.get("mac.volume") == 12
+
+
+async def test_volume_send_failure_is_logged_without_a_traceback_and_ends_the_target(store, caplog):
+    mac = FakeMac()
+    mac.error = MacError("osascript: nope")
+    store.set("mac.volume", 40)
+    dial = volume_dial(make_services(store, mac))
+    with caplog.at_level(logging.WARNING):
+        await dial.on_turn(1)
+        await settle()
+    (record,) = caplog.records
+    assert record.name == "deck.mac.dials" and record.exc_info is None
+    assert "volume to 42" in record.message and "osascript: nope" in record.message
+    store.set("mac.volume", 40)  # the Mac's real level comes back
+    mac.error = None
+    await dial.on_turn(1)
+    assert store.get("mac.volume") == 42  # stepped from the store, not the failed 42 target
+
+
+async def test_volume_send_while_the_connection_drops_is_logged_quietly(store, caplog):
+    mac = FakeMac()
+    mac.error = MacOffline("the Mac connection was lost")
+    store.set("mac.volume", 40)
+    with caplog.at_level(logging.WARNING):
+        await volume_dial(make_services(store, mac)).on_turn(1)
+        await settle()
+    assert [r.exc_info for r in caplog.records] == [None]
+
+
+async def test_a_rejected_optimistic_write_is_corrected_by_the_next_push(client, store, caplog):
+    await client.request("reject", ["volume"])
+    dial = volume_dial(make_services(store, client))
+    with caplog.at_level(logging.WARNING, logger="deck.mac.dials"):
+        await dial.on_turn(1)
+        assert store.get("mac.volume") == 44  # shown at once
+        await eventually(lambda: "boom" in caplog.text)  # the Mac refused it
+    assert store.get("mac.volume") == 44  # and nothing has corrected the display yet
+    # `deck remote` sends the whole state again after each request, so the Mac's real level comes
+    await client.request("push", {"volume": 42})
+    await eventually(lambda: store.get("mac.volume") == 42)
+
+
 async def test_volume_dial_without_a_mac_client_does_nothing(store):
     store.set("mac.volume", 40)
     dial = volume_dial(make_services(store, None))
@@ -617,6 +695,35 @@ async def test_input_turn_coalesces_to_the_latest_target(store):
     mac.block.set()
     await settle()
     assert mac.requests == [("audio.input", "MV7 USB"), ("audio.input", "Quiet MV7")]
+
+
+async def test_input_turn_in_flight_steps_from_the_target_not_a_stale_push(store):
+    mac = FakeMac()
+    mac.block = asyncio.Event()
+    store.update("mac.audio.", {"inputs": ["Q9 Mic", "MV7 USB", "Quiet MV7"], "input": "Q9 Mic"})
+    dial = input_dial(make_services(store, mac))
+    await dial.on_turn(1)  # MV7 USB, now in flight
+    store.set("mac.audio.input", "Q9 Mic")  # a push still carrying the input from before
+    await dial.on_turn(1)
+    assert store.get("mac.audio.input") == "Quiet MV7"  # not MV7 USB again
+    mac.block.set()
+    await settle()
+    assert mac.requests == [("audio.input", "MV7 USB"), ("audio.input", "Quiet MV7")]
+    store.set("mac.audio.input", "Q9 Mic")  # after the sends the store is the base again
+    await dial.on_turn(1)
+    assert store.get("mac.audio.input") == "MV7 USB"
+
+
+async def test_input_send_failure_is_logged_without_a_traceback(store, caplog):
+    mac = FakeMac()
+    mac.error = MacError("SwitchAudioSource: nope")
+    store.update("mac.audio.", {"inputs": ["Q9 Mic", "MV7 USB"], "input": "Q9 Mic"})
+    with caplog.at_level(logging.WARNING):
+        await input_dial(make_services(store, mac)).on_turn(1)
+        await settle()
+    (record,) = caplog.records
+    assert record.name == "deck.mac.dials" and record.exc_info is None
+    assert "MV7 USB" in record.message and "SwitchAudioSource: nope" in record.message
 
 
 async def test_input_turn_without_audio_config_or_inputs_does_nothing(store):

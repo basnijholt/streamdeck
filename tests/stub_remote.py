@@ -11,6 +11,7 @@ decided by its kind, so a test scripts the stub through the client itself:
     hold     hold the replies to the kinds in `args` until `release` (the kinds' requests are
              still recorded at once)
     release  answer the held requests, then reply
+    reject   answer the kinds in `args` with the error "boom" from now on, then reply
     noise    write `args` lines to stderr, then reply
     big      reply with a string of `args` characters
     fail     reply with the error "boom"
@@ -46,6 +47,7 @@ def main(argv: list[str]) -> None:
     received: list[dict] = []
     held_kinds: set[str] = set()
     held: list[tuple[int, object]] = []
+    rejected_kinds: set[str] = set()
 
     while line := sys.stdin.readline():
         message = json.loads(line)
@@ -77,6 +79,9 @@ def main(argv: list[str]) -> None:
             held.clear()
             held_kinds.clear()
             reply(request_id, None)
+        elif kind == "reject":
+            rejected_kinds = set(args)
+            reply(request_id, None)
         elif kind == "noise":
             for i in range(args):
                 print(f"stub noise {i}", file=sys.stderr)
@@ -90,6 +95,8 @@ def main(argv: list[str]) -> None:
             pass
         elif kind == "die":
             os._exit(0)
+        elif kind in rejected_kinds:
+            send({"id": request_id, "ok": False, "error": "boom"})
         elif kind in held_kinds:
             held.append((request_id, args))
         else:

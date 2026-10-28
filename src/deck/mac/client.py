@@ -153,6 +153,8 @@ class MacClient:
         try:
             return await asyncio.shield(spawn)
         except asyncio.CancelledError:
+            # Whatever happens from here, even a second cancel, a child that appears must die.
+            spawn.add_done_callback(_kill_spawned)
             _, unfinished = await asyncio.wait({spawn}, timeout=SPAWN_GRACE)
             for task in unfinished:
                 task.cancel()
@@ -235,10 +237,33 @@ def _log_stderr(line: bytes) -> None:
         log.warning("Mac: %s", text[:MAX_LOG_LINE])
 
 
+def _kill_spawned(spawn: asyncio.Future[Process]) -> None:
+    """Done-callback of a spawn nobody is waiting for any more: its child must not live on."""
+    if spawn.cancelled() or spawn.exception() is not None:
+        return
+    proc = spawn.result()
+    with contextlib.suppress(ProcessLookupError):
+        proc.kill()
+    if proc.stdin is not None:
+        proc.stdin.close()
+
+
 async def _stop(proc: Process, stderr_task: asyncio.Task[None] | None) -> None:
     """Close the child's stdin, terminate it, kill it if it lingers: no process is left behind."""
     assert proc.stdin
     proc.stdin.close()
+    try:
+        await _end(proc)
+    finally:  # also when cancelled again while waiting
+        if stderr_task is not None:
+            try:
+                await asyncio.wait({stderr_task}, timeout=STDERR_GRACE)
+            finally:
+                stderr_task.cancel()
+            await asyncio.gather(stderr_task, return_exceptions=True)
+
+
+async def _end(proc: Process) -> None:
     try:
         if proc.returncode is None:
             with contextlib.suppress(ProcessLookupError):
@@ -250,10 +275,6 @@ async def _stop(proc: Process, stderr_task: asyncio.Task[None] | None) -> None:
             with contextlib.suppress(ProcessLookupError):
                 proc.kill()
             await proc.wait()
-        if stderr_task is not None:
-            await asyncio.wait({stderr_task}, timeout=STDERR_GRACE)
-            stderr_task.cancel()
-            await asyncio.gather(stderr_task, return_exceptions=True)
 
 
 # --- actions ----------------------------------------------------------------
@@ -278,5 +299,5 @@ async def handle_mac_action(client: MacClient, audio: AudioConfig | None, action
             "disconnect": args.disconnect,
         }
     elif isinstance(args, BaseModel):
-        args = args.model_dump()
+        args = args.model_dump(mode="json")
     await client.request(kind, args)

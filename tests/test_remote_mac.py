@@ -431,9 +431,11 @@ async def test_active_url_is_none_for_empty_output(executor, runner):
 
 async def test_output_connects_bt_then_switches(executor, runner, fake_sleep):
     runner.script(BT_CONNECTED, Result(0, "[]\n", ""))
-    runner.script(LIST_OUTPUTS, lines(device("MacBook Speakers")), lines(
-        device("MacBook Speakers"), device("iLoud Micro Monitor")
-    ))
+    runner.script(
+        LIST_OUTPUTS,
+        lines(device("MacBook Speakers")),
+        lines(device("MacBook Speakers"), device("iLoud Micro Monitor")),
+    )
     await executor.run("audio.output", ILOUD | {"name": "iLoud"})
     assert runner.calls == [
         BT_CONNECTED,
@@ -810,44 +812,107 @@ async def test_poller_polls_with_timeouts(executor):
 # --- pin_input --------------------------------------------------------------
 
 AIRPODS_INPUTS = ("AirPods", "Q9 USB")
+SWITCH_INPUT = ["SwitchAudioSource", "-t", "input"]
 
 
-async def test_pin_input_switches_back(poller, runner, executor):
+def switched_input(runner) -> list[list[str]]:
+    return [c for c in runner.calls if c[:3] == SWITCH_INPUT]
+
+
+async def baseline(poller, runner, current_input="Q9 USB", inputs=("Q9 USB",)):
+    """The first poll, which only records which input devices there are."""
+    script_snapshot(runner, current_input=current_input, inputs=inputs)
+    await poller.snapshot()
+
+
+async def test_pin_input_switches_back_when_a_device_appears(poller, runner, executor):
     executor.configure({"audio": {"inputs": ["q9"], "pin_input": True}})
-    script_snapshot(runner, current_input="AirPods", inputs=AIRPODS_INPUTS)
+    await baseline(poller, runner)
+    script_snapshot(runner, current_input="AirPods", inputs=AIRPODS_INPUTS)  # AirPods connect
     snapshot = await poller.snapshot()
     assert runner.calls[-1] == ["SwitchAudioSource", "-t", "input", "-s", "Q9 USB"]
     assert snapshot["audio.input"] == "Q9 USB"
 
 
+async def test_pin_input_switches_back_when_a_device_goes_away(poller, runner, executor):
+    executor.configure({"audio": {"inputs": ["q9", "macbook"], "pin_input": True}})
+    await baseline(poller, runner, "Q9 USB", ("Q9 USB", "MacBook Microphone"))
+    script_snapshot(runner, current_input="MacBook Microphone", inputs=("MacBook Microphone",))
+    assert (await poller.snapshot())["audio.input"] == "MacBook Microphone"  # nothing to pin to
+    assert switched_input(runner) == []
+    script_snapshot(
+        runner, current_input="MacBook Microphone", inputs=("Q9 USB", "MacBook Microphone")
+    )
+    assert (await poller.snapshot())["audio.input"] == "Q9 USB"  # the mic is back
+    assert switched_input(runner) == [[*SWITCH_INPUT, "-s", "Q9 USB"]]
+
+
+async def test_pin_input_leaves_a_changed_input_alone_while_the_devices_stay(
+    poller, runner, executor
+):
+    executor.configure({"audio": {"inputs": ["q9", "airpods"], "pin_input": True}})
+    await baseline(poller, runner, "Q9 USB", AIRPODS_INPUTS)
+    for _ in range(3):  # a deliberate choice (the input dial) is not undone by later polls
+        script_snapshot(runner, current_input="AirPods", inputs=AIRPODS_INPUTS)
+        assert (await poller.snapshot())["audio.input"] == "AirPods"
+    assert switched_input(runner) == []
+
+
+async def test_pin_input_does_not_pin_on_the_first_poll(poller, runner, executor):
+    executor.configure({"audio": {"inputs": ["q9"], "pin_input": True}})
+    script_snapshot(runner, current_input="AirPods", inputs=AIRPODS_INPUTS)
+    assert (await poller.snapshot())["audio.input"] == "AirPods"
+    assert switched_input(runner) == []
+
+
 async def test_pin_input_off_leaves_the_input_alone(poller, runner, executor):
     executor.configure({"audio": {"inputs": ["q9"], "pin_input": False}})
+    await baseline(poller, runner)
     script_snapshot(runner, current_input="AirPods", inputs=AIRPODS_INPUTS)
     snapshot = await poller.snapshot()
-    assert not any(c[:3] == ["SwitchAudioSource", "-t", "input"] for c in runner.calls)
+    assert switched_input(runner) == []
     assert snapshot["audio.input"] == "AirPods"
 
 
 async def test_pin_input_does_nothing_when_already_preferred(poller, runner, executor):
     executor.configure({"audio": {"inputs": ["q9"], "pin_input": True}})
+    await baseline(poller, runner)
     script_snapshot(runner, current_input="Q9 USB", inputs=AIRPODS_INPUTS)
     await poller.snapshot()
-    assert not any(c[:3] == ["SwitchAudioSource", "-t", "input"] for c in runner.calls)
+    assert switched_input(runner) == []
 
 
 async def test_pin_input_does_nothing_when_no_preference_is_available(poller, runner, executor):
     executor.configure({"audio": {"inputs": ["q9"], "pin_input": True}})
+    await baseline(poller, runner, "MacBook Microphone", ("MacBook Microphone",))
     script_snapshot(runner, current_input="AirPods", inputs=("AirPods", "MacBook Microphone"))
     snapshot = await poller.snapshot()
-    assert not any(c[:3] == ["SwitchAudioSource", "-t", "input"] for c in runner.calls)
+    assert switched_input(runner) == []
     assert snapshot["audio.input"] == "AirPods"
 
 
 async def test_pin_input_failure_keeps_the_current_input(poller, runner, executor):
     executor.configure({"audio": {"inputs": ["q9"], "pin_input": True}})
+    await baseline(poller, runner)
     script_snapshot(runner, current_input="AirPods", inputs=AIRPODS_INPUTS)
     runner.script(["SwitchAudioSource", "-t", "input", "-s"], Result(1, "", "nope\n"))
     assert (await poller.snapshot())["audio.input"] == "AirPods"
+
+
+async def test_pin_input_ignores_a_failed_device_listing(poller, runner, executor):
+    executor.configure({"audio": {"inputs": ["q9"], "pin_input": True}})
+    await baseline(poller, runner)
+    script_snapshot(
+        runner,
+        {tuple(LIST_INPUTS): Result(1, "", "boom")},
+        current_input="AirPods",
+        inputs=AIRPODS_INPUTS,
+    )
+    snapshot = await poller.snapshot()
+    assert "audio.inputs" not in snapshot and snapshot["audio.input"] == "AirPods"
+    assert switched_input(runner) == []
+    script_snapshot(runner, current_input="AirPods", inputs=AIRPODS_INPUTS)
+    assert (await poller.snapshot())["audio.input"] == "Q9 USB"  # compared with the last good list
 
 
 # --- deck remote ------------------------------------------------------------

@@ -71,7 +71,9 @@ async def serve(
 
     State pushes start once the PC's `hello` arrives (a request that comes first counts as an
     empty hello). A request runs as its own task, so a slow one never holds up the next line,
-    the other requests or the state pushes. On EOF everything still running is cancelled.
+    the other requests or the state pushes. When a request finishes, the next push is the full
+    state again, so the PC's idea of it is corrected even if the Mac's values did not change.
+    On EOF everything still running is cancelled.
     """
     await _Session(writer, executor, poller, interval).run(reader)
 
@@ -100,6 +102,8 @@ class _Session:
         self._poller = poller
         self._interval = interval
         self._write_lock = asyncio.Lock()
+        self._sent: dict[str, Any] = {}  # the state the PC knows
+        self._finished_requests = 0  # a poll that began before this changed may predate a request
         self._requests: set[asyncio.Task[None]] = set()
         self._state_task: asyncio.Task[None] | None = None  # set once configured
 
@@ -178,18 +182,27 @@ class _Session:
         except Exception:  # includes a result JSON cannot hold
             log.exception("request %s (%s) failed", request_id, kind)
             data = _encode({"id": request_id, "ok": False, "error": INTERNAL_ERROR})
+        # Whatever the request did or failed to do, the PC may now show something else than the
+        # Mac has (an optimistic dial value): forget what was sent so the next poll sends it all.
+        self._sent.clear()
+        self._finished_requests += 1
         await self._write(data)
 
     async def _push_state(self) -> None:
-        sent: dict[str, Any] = {}  # what the PC knows
         first = True
         while True:
             try:
+                finished = self._finished_requests
                 snapshot = await self._poller.snapshot()
-                changed = {k: v for k, v in snapshot.items() if k not in sent or sent[k] != v}
+                if finished != self._finished_requests:
+                    continue  # a request finished meanwhile, so this poll may be stale: poll again
+                changed = {
+                    k: v for k, v in snapshot.items() if k not in self._sent or self._sent[k] != v
+                }
                 if first or changed:
-                    await self._write(_encode({"state": changed}))
-                    sent.update(changed)
+                    data = _encode({"state": changed})
+                    self._sent.update(changed)  # before the write: a request may finish during it
+                    await self._write(data)
                     first = False
             except Exception:
                 log.exception("polling the state failed; retrying")

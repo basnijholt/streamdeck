@@ -187,6 +187,54 @@ async def test_unserializable_snapshot_is_logged_and_retried():
         assert await link.recv() == {"state": {"a": 1}}
 
 
+async def test_a_finished_request_makes_the_next_push_the_full_state():
+    # The PC may show an optimistic value the Mac never took: the unchanged state is sent again.
+    async with running(poller=StubPoller([{"a": 1, "b": 2}])) as link:
+        assert await link.start() == {"state": {"a": 1, "b": 2}}
+        await link.assert_silent()
+        await link.send({"id": 1, "kind": "app", "args": "Ghostty"})
+        assert await link.recv() == {"id": 1, "ok": True, "result": None}
+        assert await link.recv() == {"state": {"a": 1, "b": 2}}
+        await link.assert_silent()  # and only once
+
+
+async def test_a_failed_request_makes_the_next_push_the_full_state():
+    async def handler(kind, args):
+        raise RemoteError("boom")
+
+    async with running(StubExecutor(handler), StubPoller([{"a": 1}])) as link:
+        await link.start()
+        await link.send({"id": 1, "kind": "app", "args": "Ghostty"})
+        assert await link.recv() == {"id": 1, "ok": False, "error": "boom"}
+        assert await link.recv() == {"state": {"a": 1}}
+
+
+async def test_a_poll_that_began_before_a_request_finished_is_not_pushed():
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    class SlowPoller:
+        """The second poll starts before the request and answers (stale) only after it."""
+
+        def __init__(self):
+            self.calls = 0
+
+        async def snapshot(self):
+            self.calls += 1
+            if self.calls == 2:
+                entered.set()
+                await release.wait()
+                return {"v": 1}
+            return {"v": 1} if self.calls == 1 else {"v": 2}
+
+    async with running(poller=SlowPoller()) as link:
+        assert await link.start() == {"state": {"v": 1}}
+        await asyncio.wait_for(entered.wait(), 2)
+        await link.send({"id": 1, "kind": "app", "args": "Ghostty"})
+        assert await link.recv() == {"id": 1, "ok": True, "result": None}
+        release.set()
+        assert await link.recv() == {"state": {"v": 2}}  # not the stale {"v": 1}
+
+
 # --- requests ---------------------------------------------------------------
 
 

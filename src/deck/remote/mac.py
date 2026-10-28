@@ -477,6 +477,7 @@ class MacPoller(Poller):
     def __init__(self, runner: Runner, executor: MacExecutor) -> None:
         self._runner = runner
         self._executor = executor
+        self._input_devices: frozenset[str] | None = None  # as of the previous poll
 
     async def snapshot(self) -> dict[str, Any]:
         """The current state; a key whose query failed is left out. Values are fresh each call."""
@@ -524,9 +525,17 @@ class MacPoller(Poller):
             return None
 
     async def _pin_input(self, current: str, available: list[str]) -> str:
-        """With `pin_input`, switch back to the preferred input; return the current input."""
+        """With `pin_input`, switch back to the preferred input; return the current input.
+
+        Only when the set of input devices changed since the previous poll: that is when macOS
+        switches by itself (AirPods connecting, the USB mic being plugged in). Re-pinning on
+        every poll would undo a deliberate choice, such as the input dial's. The first poll
+        only records the devices.
+        """
         executor = self._executor
-        if not executor.pin_input:
+        devices = frozenset(available)
+        known, self._input_devices = self._input_devices, devices
+        if not executor.pin_input or known is None or known == devices:
             return current
         preferred = preferred_input(available, executor.input_prefs)
         if preferred is None or preferred == current:
