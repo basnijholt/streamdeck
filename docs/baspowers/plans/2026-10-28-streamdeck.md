@@ -27,7 +27,7 @@
 - Secrets only from environment variables named in config (`token_env`); never from YAML.
 - Control socket `$XDG_RUNTIME_DIR/deck.sock`, mode 0600; it never exposes Mac execution.
 - State changes visible on keys within ~1 s; renders throttled to ≤ 20 Hz; only changed images are pushed to the device.
-- Colors (from the approved mockup): working bg `#0f2a1a` border `#22c55e`; needs-you bg `#3a2a06` border `#f59e0b`; done bg `#1a1a1f` border `#3f3f46`; error/live bg `#3a0f0f` border `#ef4444`; on/lit bg `#3a3208` border `#facc15`; default key bg `#1c1c21` border `#2a2a31`; selected border `#ffffff`.
+- Colors (from the approved mockup): working bg `#0f2a1a` border `#22c55e`; needs-you bg `#3a2a06` border `#f59e0b`; done bg `#1a1a1f` border `#3f3f46`; error/live bg `#3a0f0f` border `#ef4444`; on/lit bg `#3a3208` border `#facc15`; default key bg `#1c1c21` border `#2a2a31`.
 
 ## Review Focus
 
@@ -182,7 +182,7 @@ def test_output_key_lit_when_active(): ...       # mac.audio.output "iLoud Micro
 def test_mac_key_dimmed_when_offline(): ...      # mac.online False -> dim True, badge "🚫"
 def test_mic_key_amber_when_not_preferred(): ... # input "AirPods Pro" -> border "#f59e0b"
 def test_ha_key_on_and_unavailable(): ...
-def test_selected_slot_has_white_border(): ...
+def test_slot_dim_when_server_offline(): ...       # t3.online.pc False -> dim True
 def test_store_update_replace_drops_stale_keys(): ...
 ```
 
@@ -334,7 +334,6 @@ async def test_brightness_preset_press(store): ...   # current 78 -> 35 ; curren
 
 **Files:**
 - Create: `src/deck/remote/__init__.py`, `src/deck/remote/server.py`, `tests/test_remote_server.py`
-- Modify: `src/deck/cli.py` (`deck remote` → `serve_stdio()` with the Task 9 executor/poller)
 
 **Interfaces:**
 - Produces (`deck.remote.server`):
@@ -343,6 +342,7 @@ async def test_brightness_preset_press(store): ...   # current 78 -> 35 ; curren
   - `class Executor(Protocol)`: `async run(kind: str, args: Any) -> Any` (return value becomes `result`); `configure(hello: dict) -> None`.
   - `class Poller(Protocol)`: `async snapshot() -> dict`.
   - `async serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, executor: Executor, poller: Poller, interval: float = 1.0) -> None`.
+  - `async serve_stdio(executor: Executor, poller: Poller) -> None` — wraps stdin/stdout as streams and calls `serve`. (The `deck remote` CLI subcommand is wired in Task 9, once `MacExecutor` exists.)
 - Wire format (both directions, one JSON object per line):
   - PC → Mac first line: `{"hello": {"audio": {"outputs": [...], "inputs": [...], "pin_input": bool}}}` → `executor.configure(hello)`.
   - PC → Mac: `{"id": int, "kind": str, "args": any}`.
@@ -370,6 +370,7 @@ async def test_url_scheme_rechecked(): ...      # {"kind":"url","args":"file:///
 
 **Files:**
 - Create: `src/deck/remote/mac.py`, `tests/test_remote_mac.py`
+- Modify: `src/deck/cli.py` (`deck remote` → `serve_stdio(MacExecutor(Runner()), MacPoller(...))`)
 
 **Interfaces:**
 - Consumes: `Runner`/`FakeRunner` (Task 7), `Executor`/`Poller`/`RemoteError` (Task 8), `preferred_input`, `matches` (Task 3).
@@ -480,7 +481,7 @@ async def test_ha_brightness_coalesces(ha, http_stub): ...              # 20 tic
 
 **Interfaces:**
 - Consumes: `Thread` (Task 3), `T3Server` (Task 1).
-- Produces (`deck.t3.source`): `@dataclass(frozen=True) ModelSelection(instance_id: str, model: str, options: tuple[tuple[str, Any], ...])`; `class T3Source(Protocol)`: `async list_threads() -> list[Thread]`, `async get_model_selection(thread_id: str) -> ModelSelection`, `async set_model_selection(thread_id: str, selection: ModelSelection) -> None`, `thread_url(thread: Thread) -> str` (`f"{web_url}/{environment_id}/{thread_id}"`); `thread_id_from_url(url: str) -> str|None` (inverse: host must equal the `web_url` host and the path must be exactly `/<environment_id>/<threadId>`; anything else → `None`); `class T3Client(T3Source)`: `__init__(server: T3Server, token: str)`; `async watch(store: StateStore, interval: float = 1.0)` — refreshes `t3.threads` (merged across servers by the caller) and `t3.online.<server>`.
+- Produces (`deck.t3.source`): `@dataclass(frozen=True) ModelSelection(instance_id: str, model: str, options: tuple[tuple[str, Any], ...])`; `class T3Source(Protocol)` with methods: `async list_threads() -> list[Thread]`, `async get_model_selection(thread_id: str) -> ModelSelection`, `async set_model_selection(thread_id: str, selection: ModelSelection) -> None`, `thread_url(thread: Thread) -> str` (`f"{web_url}/{environment_id}/{thread_id}"`); `thread_id_from_url(url: str) -> str|None` (inverse: host must equal the `web_url` host and the path must be exactly `/<environment_id>/<threadId>`; anything else → `None`); `class T3Client(T3Source)`: `__init__(server: T3Server, token: str)`; `async watch(store: StateStore, interval: float = 1.0)` — refreshes `t3.threads.<server>` (this server's threads only) and `t3.online.<server>`; Task 13 merges all `t3.threads.<server>` lists into `t3.threads`.
 
 - [ ] **Step 1: Spike — decide the transport.** Mint a token: `t3 auth session issue --scope orchestration:read --scope orchestration:operate --label streamdeck-dev --ttl 1d --token-only`. Read `pingdotgg/t3code` `apps/server` source (WebSocket RPC envelope, `/api/auth/websocket-ticket`, `orchestration.subscribeShell`, `dispatchCommand` payload for `thread.model-selection.set`) and `/api/mcp` (JSON-RPC `tools/call` for `t3_project_list`, `t3_thread_list`, `t3_thread_configure`). Pick the first option that, with the bearer token, can (a) list threads across all projects including `pendingRequestCount`, `projectId`, `modelSelection`, and (b) set `modelSelection`. Preference: `/api/mcp` (stable tool names, plain JSON-RPC) unless it rejects bearer tokens. Record the decision and exact request/response shapes in `docs/t3-protocol.md`, and save real responses (secrets and message text removed) under `tests/fixtures/t3/`. Revoke the dev token afterward (`t3 auth session revoke`).
 - [ ] **Step 2: Write the failing tests** against a local stub server replaying the fixtures
@@ -511,7 +512,7 @@ def test_thread_id_from_url_roundtrip(): ...  # roundtrip; other host, other env
 
 **Files:**
 - Create: `src/deck/t3/controller.py`, `tests/test_t3_controller.py`
-- Modify: `src/deck/cli.py` (services factory: `T3Controller`, `t3.` handler, `t3.effort`/`t3.model` dials), `src/deck/views.py` (elapsed time from controller)
+- Modify: `src/deck/cli.py` (services factory: `T3Controller`, `t3.` handler, `t3.effort`/`t3.model` dials), `src/deck/views.py` (elapsed time: add optional parameter `running_for: Callable[[Thread], float] | None = None` to `key_view`; when given, the working sublabel shows `working <N>m`)
 
 **Interfaces:**
 - Consumes: `Thread`, `thread_state`, `visible_threads` (Task 3); `T3Source`, `ModelSelection`, `thread_id_from_url` (Task 12); `MacClient.request`, `MacOffline` (Task 10); `DialHandler` (Task 5).
@@ -519,6 +520,7 @@ def test_thread_id_from_url_roundtrip(): ...  # roundtrip; other host, other env
   - `async focus(slot: int)` — `mac.request("tab", {"match": <web_url host>, "url": source.thread_url(thread), "navigate": True})` for the thread in that visible slot; empty slot → no-op.
   - `async new_thread()` — same request with `url` = the first server's `web_url`.
   - `async thread_in_front() -> Thread|None` — `await mac.request("active_url", None)`, then the first source whose `thread_id_from_url(url)` is not None, then that thread from `t3.threads` (or `None` if unknown). Raises `MacOffline` through.
+  - Merges every `t3.threads.<server>` list into `t3.threads` whenever one changes (store subscription).
   - `running_for(thread: Thread) -> float` — seconds since the deck first saw the current working status; reset on status change.
   - `class EffortDial` / `class ModelDial(DialHandler)`: on a turn with no live capture (none yet, or > 10 s since the last turn), call `thread_in_front()` and capture `(server, thread_id)`; `None` → `t3.pending.<kind> = "no T3 thread in front"`, stop. Each turn steps the pending value over `cfg.efforts` / `cfg.models[thread.instance_id]` from the thread's current value and sets `t3.pending.<kind> = "<title> · <current> → <pending>"`. Press: call `thread_in_front()` again; a different thread or `None` → `"thread changed — not applied"`; `MacOffline` → `"Mac offline — not applied"`; same thread → `set_model_selection(thread_id, ...)` replacing only `effort` or `model`, keeping `instance_id` and other options, then clear pending. Server error → `"error: <msg>"`. Messages clear after 2 s; an unapplied pending clears after 10 s idle.
 
