@@ -599,6 +599,129 @@ async def test_page_switch_drops_pending_flash(make_daemon, deck, clock):
     assert deck.keys[0].tobytes() == image_bytes(home_key("Back", "🏠"))
 
 
+# --- slow actions ---------------------------------------------------------------
+
+BUSY_SECONDS = 0.02  # the daemon waits 0.4 s; tests shorten it
+GHOSTTY_BUSY = replace(GHOSTTY, badge="⏳")
+
+
+@pytest.fixture
+def quick_busy(monkeypatch) -> None:
+    monkeypatch.setattr(daemon_module, "BUSY_SECONDS", BUSY_SECONDS)
+
+
+async def test_slow_action_shows_hourglass_until_it_finishes(make_daemon, deck, clock, quick_busy):
+    gate = asyncio.Event()
+
+    async def slow(action: Action) -> None:
+        await gate.wait()
+
+    daemon = await make_daemon(clock, handler=slow)
+    await press(daemon, 0)
+    daemon.render()
+    assert deck.keys[0].tobytes() == image_bytes(GHOSTTY)  # not yet: the wait is still short
+    await wait_until(lambda: daemon._busy)
+    daemon.render()
+    assert deck.keys[0].tobytes() == image_bytes(GHOSTTY_BUSY)
+    assert image_bytes(GHOSTTY_BUSY) != image_bytes(GHOSTTY)
+    gate.set()
+    await settle()
+    daemon.render()
+    assert deck.keys[0].tobytes() == image_bytes(GHOSTTY)
+
+
+async def test_hourglass_marks_the_render_dirty_in_the_running_daemon(
+    make_daemon, deck, quick_busy
+):
+    gate = asyncio.Event()
+
+    async def slow(action: Action) -> None:
+        await gate.wait()
+
+    daemon = await make_daemon(handler=slow, started=False)  # real clock
+    async with running(daemon, deck):
+        await wait_until(lambda: deck.push_count >= KEYS_AND_SEGMENTS)
+        await deck.inject(KeyDown(0), KeyUp(0))
+        await wait_until(lambda: deck.keys[0].tobytes() == image_bytes(GHOSTTY_BUSY))
+        gate.set()
+        await wait_until(lambda: deck.keys[0].tobytes() == image_bytes(GHOSTTY))
+
+
+async def test_fast_action_never_shows_hourglass(daemon, deck, quick_busy):
+    await press(daemon, 0)
+    await asyncio.sleep(BUSY_SECONDS * 3)  # past the wait: a pending timer would have fired
+    assert daemon._busy == {}
+    daemon.render()
+    assert deck.keys[0].tobytes() == image_bytes(GHOSTTY)
+
+
+async def test_slow_failure_replaces_the_hourglass_with_the_error_flash(
+    make_daemon, deck, clock, quick_busy
+):
+    gate = asyncio.Event()
+
+    async def slow_failure(action: Action) -> None:
+        await gate.wait()
+        raise RuntimeError("timed out")
+
+    daemon = await make_daemon(clock, handler=slow_failure)
+    await press(daemon, 0)
+    await wait_until(lambda: daemon._busy)
+    gate.set()
+    await settle()
+    daemon.render()
+    assert deck.keys[0].tobytes() == image_bytes(replace(GHOSTTY, **ERROR_COLORS))
+
+
+async def test_cancelled_action_clears_the_hourglass(make_daemon, deck, clock, quick_busy):
+    async def forever(action: Action) -> None:
+        await asyncio.Event().wait()
+
+    daemon = await make_daemon(clock, handler=forever)
+    await press(daemon, 0)
+    await wait_until(lambda: daemon._busy)
+    for task in list(daemon._tasks):
+        task.cancel()
+    await settle()
+    assert daemon._busy == {}
+    daemon.render()
+    assert deck.keys[0].tobytes() == image_bytes(GHOSTTY)
+
+
+async def test_no_hourglass_on_the_new_page_after_a_page_switch(
+    make_daemon, deck, clock, quick_busy
+):
+    gate = asyncio.Event()
+
+    async def slow(action: Action) -> None:
+        await gate.wait()
+
+    daemon = await make_daemon(clock, handler=slow)
+    await press(daemon, 0)  # slow action on page "home"
+    await press(daemon, 1)  # now on page "second", whose key 0 is another key
+    await asyncio.sleep(BUSY_SECONDS * 3)
+    daemon.render()
+    assert deck.keys[0].tobytes() == image_bytes(home_key("Back", "🏠"))
+    gate.set()
+    await settle()
+
+
+async def test_page_switch_drops_the_hourglass(make_daemon, deck, clock, quick_busy):
+    gate = asyncio.Event()
+
+    async def slow(action: Action) -> None:
+        await gate.wait()
+
+    daemon = await make_daemon(clock, handler=slow)
+    await press(daemon, 0)
+    await wait_until(lambda: daemon._busy)  # badge is up on page "home"
+    await press(daemon, 1)  # the switch drops it
+    daemon.render()
+    assert deck.keys[0].tobytes() == image_bytes(home_key("Back", "🏠"))
+    gate.set()
+    await settle()
+
+
 # --- config reload ----------------------------------------------------------------
 
 

@@ -40,6 +40,8 @@ log = logging.getLogger(__name__)
 
 LONG_PRESS_SECONDS = 0.5
 FLASH_SECONDS = 1.0
+BUSY_SECONDS = 0.4  # an action running longer than this puts ⏳ on its key
+BUSY_BADGE = "⏳"
 RENDER_INTERVAL = 0.05  # 20 Hz
 WATCH_INTERVAL = 1.0
 WATCH_STABLE = 0.3
@@ -89,6 +91,8 @@ class Daemon:
         # Pressed keys: index -> (press time, the key's spec and page when it went down).
         self._down: dict[int, tuple[float, KeySpec, str]] = {}
         self._flash: dict[int, float] = {}  # key index -> when its error flash ends
+        # Slow actions on the page on show: one token per action, each with its key index.
+        self._busy: dict[object, int] = {}
         self._pushed: dict[Slot, tuple[Any, bytes]] = {}  # last view and image bytes pushed
         self._config_error = False
         self._signature = self._config_signature()
@@ -140,6 +144,7 @@ class Daemon:
         if self.current_page not in config.pages:
             self.current_page = config.start_page
             self._flash.clear()
+            self._busy.clear()
         self._dials = self._build_dials(self._page(), self.services)
         stale = [
             name
@@ -181,6 +186,7 @@ class Daemon:
         self.current_page = name
         self._dials = self._build_dials(page, self.services)
         self._flash.clear()
+        self._busy.clear()
         self._dirty.set()
 
     @staticmethod
@@ -302,6 +308,10 @@ class Daemon:
         self._spawn(self._run_action(index, page, action))
 
     async def _run_action(self, index: int, page: str, action: Action) -> None:
+        token = object()
+        timer = asyncio.get_running_loop().call_later(
+            BUSY_SECONDS, self._show_busy, token, index, page
+        )
         try:
             await self.services.actions.run(action)
         except Exception:
@@ -309,6 +319,16 @@ class Daemon:
             if self.current_page == page:  # else the key is no longer on screen
                 self._flash[index] = self._clock() + FLASH_SECONDS
                 self._dirty.set()
+        finally:
+            timer.cancel()
+            if self._busy.pop(token, None) is not None:
+                self._dirty.set()
+
+    def _show_busy(self, token: object, index: int, page: str) -> None:
+        """The action behind `token` is still running: put ⏳ on its key if that is on screen."""
+        if self.current_page == page:
+            self._busy[token] = index
+            self._dirty.set()
 
     async def _dial_turn(self, index: int, ticks: int) -> None:
         # Awaited in event order, so ticks are never reordered (see `DialHandler`).
@@ -369,9 +389,12 @@ class Daemon:
         slot_threads = visible_threads(self.store.get("t3.threads", []))
         t3 = self.services.t3
         running_for = t3.running_for if t3 is not None else None
+        busy = set(self._busy.values())
         for index in range(self._device.key_count):
             spec = page.keys[index] if index < len(page.keys) else None
             view = key_view(spec, self.store, self.config, slot_threads, running_for)
+            if index in busy:
+                view = replace(view, badge=BUSY_BADGE)
             if index in self._flash:
                 view = replace(view, bg=ERROR[0], border=ERROR[1])
             if self._config_error and index == 0:
