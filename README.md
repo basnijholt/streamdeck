@@ -279,7 +279,8 @@ Every Mac gets its own key and its own name (`macbook` below).
 
 1. Install the tools: `brew install switchaudio-osx blueutil`, and the package with
    `uv tool install`.
-2. Make a key that the Mac uses only for this:
+2. Make a key that the Mac uses only for this. `deck connect` offers ssh only this key
+   (`IdentitiesOnly`) and ignores the keys in your agent:
 
    ```bash
    mkdir -p ~/.config/deck
@@ -293,7 +294,14 @@ Every Mac gets its own key and its own name (`macbook` below).
    command="/home/basnijholt/.local/bin/deck attach macbook",restrict,from="192.168.1.0/24" ssh-ed25519 AAAA… deck@macbook
    ```
 
-4. Keep `deck connect` running as a LaunchAgent in your login session, so AppleScript,
+4. Trust the PC's host key now: `deck connect` runs ssh with `BatchMode=yes`, which cannot ask,
+   so without this its first connect fails with `Host key verification failed.`
+
+   ```bash
+   ssh-keyscan -H 192.168.1.5 >> ~/.ssh/known_hosts
+   ```
+
+5. Keep `deck connect` running as a LaunchAgent in your login session, so AppleScript,
    `screencapture` and Bluetooth run as you. Save this as
    `~/Library/LaunchAgents/nl.nijho.deck.plist`:
 
@@ -316,6 +324,8 @@ Every Mac gets its own key and its own name (`macbook` below).
      <true/>
      <key>KeepAlive</key>
      <true/>
+     <key>ProcessType</key>
+     <string>Interactive</string>
      <key>StandardErrorPath</key>
      <string>/tmp/deck.log</string>
    </dict>
@@ -323,11 +333,12 @@ Every Mac gets its own key and its own name (`macbook` below).
    ```
 
    and load it with `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/nl.nijho.deck.plist`.
-   If the PC is down or the daemon is not running, `deck connect` retries with backoff
-   (1 s up to 30 s) and logs to `/tmp/deck.log`.
-5. Press a Brave tab key and a Keyboard Maestro key once each, and accept the macOS Automation
+   `ProcessType` `Interactive` keeps launchd from throttling the once-a-second poll. If the PC is
+   down or the daemon is not running, `deck connect` retries with backoff (1 s up to 30 s) and
+   logs to `/tmp/deck.log`.
+6. Press a Brave tab key and a Keyboard Maestro key once each, and accept the macOS Automation
    prompts. They name the Python that runs `deck`.
-6. Optional: put executable scripts for `mac.script` in `~/.config/deck/scripts/`.
+7. Optional: put executable scripts for `mac.script` in `~/.config/deck/scripts/`.
 
 Two `deck connect`s under the same name keep replacing each other, so never share a key between
 Macs. Coming from the old PC-to-Mac setup, delete the PC's `mac_ed25519` key and the Mac's

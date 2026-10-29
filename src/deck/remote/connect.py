@@ -21,11 +21,16 @@ log = logging.getLogger(__name__)
 
 BACKOFF_START = 1.0  # seconds before the first reconnect
 BACKOFF_MAX = 30.0
-STDOUT_LIMIT = 16 << 20  # bytes a line from the PC may have before the reader gives up on it
+STDOUT_LIMIT = 16 << 20  # StreamReader buffer limit for ssh's stdout; serve caps lines itself
 
 
 def ssh_argv(destination: str, key: Path | None) -> list[str]:
-    """The ssh command that reaches the PC. No remote command: the PC's key forces one."""
+    """The ssh command that reaches the PC. No remote command: the PC's key forces one.
+
+    `ControlPath=none` keeps it off a multiplexed connection the user's own ssh may share, and
+    `IdentitiesOnly` makes it offer only `key`: an agent key that the PC accepts for a shell
+    would otherwise log in without the forced `deck attach`.
+    """
     argv = [
         "ssh",
         "-T",
@@ -37,9 +42,11 @@ def ssh_argv(destination: str, key: Path | None) -> list[str]:
         "ServerAliveInterval=3",
         "-o",
         "ServerAliveCountMax=2",
+        "-o",
+        "ControlPath=none",
     ]
     if key is not None:
-        argv += ["-i", str(key)]
+        argv += ["-o", "IdentitiesOnly=yes", "-i", str(key)]
     return [*argv, destination]
 
 

@@ -109,7 +109,7 @@ def log_file(tmp_path) -> Path:
 
 
 def test_ssh_argv():
-    assert ssh_argv("basnijholt@192.168.1.5", Path("/k")) == [
+    options = [
         "ssh",
         "-T",
         "-o",
@@ -120,11 +120,18 @@ def test_ssh_argv():
         "ServerAliveInterval=3",
         "-o",
         "ServerAliveCountMax=2",
+        "-o",
+        "ControlPath=none",
+    ]
+    assert ssh_argv("basnijholt@192.168.1.5", Path("/k")) == [
+        *options,
+        "-o",
+        "IdentitiesOnly=yes",
         "-i",
         "/k",
         "basnijholt@192.168.1.5",
     ]
-    assert "-i" not in ssh_argv("pc", None)
+    assert ssh_argv("pc", None) == [*options, "pc"]
 
 
 # --- serving ----------------------------------------------------------------
