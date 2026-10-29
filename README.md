@@ -413,3 +413,7 @@ recorded (sanitized) T3 Code protocol fixtures. Protocol notes are in
 - New thread with the clipboard as the prompt.
 - Context pages that follow the Mac's frontmost app.
 - CI and pull request status keys.
+
+## License
+
+[MIT](LICENSE)

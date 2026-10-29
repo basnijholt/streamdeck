@@ -3,6 +3,7 @@ name = "deck"
 version = "0.1.0"
 description = "YAML-configured daemon for an Elgato Stream Deck + XL"
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.13"
 dependencies = [
     "streamdeck>=0.10.0",
