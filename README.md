@@ -17,6 +17,11 @@ flip Home Assistant lights and dim the monitor — all from one YAML file.
 
 ---
 
+> [!NOTE]
+> This is a highly specific, vibe-coded setup for my own tools: one Stream Deck + XL, a NixOS PC,
+> my Macs, T3 Code, Home Assistant and a Dell monitor. It is public in case the code or ideas are
+> useful, not as a general-purpose product.
+
 ## Why
 
 The deck is plugged into an always-on NixOS PC, but 99.9 % of the work happens on a Mac that
@@ -25,11 +30,6 @@ shares the same monitor. So the daemon runs next to the USB device and treats th
 down to an allowlist of actions, carries key presses to the Mac and its state back. Nothing
 ever connects into a Mac, so a locked-down laptop can join too, and with two Macs the deck
 acts on the one you touched last.
-
-It is the successor to
-[home-assistant-streamdeck-yaml](https://github.com/basnijholt/home-assistant-streamdeck-yaml):
-Home Assistant is still in, but it is one integration among several, and the headline act is now
-coding agents.
 
 ## Highlights
 
