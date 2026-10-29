@@ -14,7 +14,7 @@ from deck import control
 from deck.actions import ActionRunner
 from deck.cli import main
 from deck.config import Action
-from deck.control import call, default_control_path, serve_control
+from deck.control import bind_private_socket, call, default_control_path, serve_control
 from deck.daemon import Daemon
 from deck.dials import Services
 from deck.events import Connected, KeyDown, KeyUp
@@ -143,22 +143,25 @@ async def test_umask_is_restored_after_creating_the_socket(make_daemon, sock_pat
     await control.close_control(server, sock_path)
 
 
-async def test_stale_socket_file_is_replaced(make_daemon, sock_path):
+def test_bind_private_socket_replaces_a_stale_socket(sock_path):
     stale = socket.socket(socket.AF_UNIX)
     stale.bind(str(sock_path))
     stale.close()  # the file stays behind, nobody listens
     assert sock_path.exists()
-    server = await serve_control(sock_path, make_daemon())
+    sock = bind_private_socket(sock_path)
     try:
-        assert (await call(sock_path, {"cmd": "nope"}))["error"] == "unknown command"
+        sock.listen()
+        with socket.socket(socket.AF_UNIX) as client:
+            client.connect(str(sock_path))
+        assert stat.S_IMODE(sock_path.lstat().st_mode) == 0o600
     finally:
-        await control.close_control(server, sock_path)
+        sock.close()
 
 
-async def test_regular_file_at_the_path_is_not_removed(make_daemon, sock_path):
+def test_bind_private_socket_refuses_a_regular_file(sock_path):
     sock_path.write_text("precious")
     with pytest.raises(OSError):
-        await serve_control(sock_path, make_daemon())
+        bind_private_socket(sock_path)
     assert sock_path.read_text() == "precious"
 
 

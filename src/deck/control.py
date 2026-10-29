@@ -33,8 +33,8 @@ def default_control_path() -> Path:
     return Path(f"/tmp/deck-{os.getuid()}.sock")
 
 
-async def serve_control(path: Path, daemon: "Daemon") -> asyncio.Server:
-    """Listen on a Unix socket at `path`, readable and writable by this user only.
+def bind_private_socket(path: Path) -> socket.socket:
+    """A Unix socket bound at `path`, readable and writable by this user only.
 
     A socket file left over from a previous run is replaced; any other file is left alone
     and the call raises `OSError`.
@@ -42,10 +42,6 @@ async def serve_control(path: Path, daemon: "Daemon") -> asyncio.Server:
     with contextlib.suppress(FileNotFoundError):
         if stat.S_ISSOCK(path.lstat().st_mode):
             path.unlink()
-
-    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        await _serve_client(reader, writer, daemon)
-
     # Bind by hand so the umask only changes while the file is created, with nothing else
     # running in between; the chmod covers a platform that ignores the umask for sockets.
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -56,6 +52,20 @@ async def serve_control(path: Path, daemon: "Daemon") -> asyncio.Server:
         finally:
             os.umask(old_umask)
         path.chmod(0o600)
+    except BaseException:
+        sock.close()
+        raise
+    return sock
+
+
+async def serve_control(path: Path, daemon: "Daemon") -> asyncio.Server:
+    """Listen on `bind_private_socket(path)`; raises `OSError` if that cannot be bound."""
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await _serve_client(reader, writer, daemon)
+
+    sock = bind_private_socket(path)
+    try:
         return await asyncio.start_unix_server(handle, sock=sock)
     except BaseException:
         sock.close()
