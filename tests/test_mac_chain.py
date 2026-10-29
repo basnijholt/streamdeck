@@ -86,6 +86,17 @@ def test_attach_without_daemon(tmp_path, monkeypatch, capsys):
     assert "deck is not running" in capsys.readouterr().err
 
 
+def test_attach_with_an_unusable_socket_path(tmp_path, monkeypatch, capsys):
+    not_a_dir = tmp_path / "file"
+    not_a_dir.write_text("")
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(not_a_dir))
+    assert main(["attach", "mini"]) == 1  # NotADirectoryError, without a traceback
+    err = capsys.readouterr().err
+    assert err.startswith(f"deck attach: {not_a_dir / 'deck-mac.sock'}: ")
+    assert "Not a directory" in err
+    assert err.count("\n") == 1
+
+
 @pytest.mark.parametrize("name", ["bad name", "", "a" * 33, "../x"])
 def test_attach_rejects_a_bad_name(name, capsys):
     assert main(["attach", name]) == 1

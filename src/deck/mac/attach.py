@@ -35,8 +35,8 @@ CHUNK = 1 << 16  # bytes moved per read
 async def attach(name: str, path: Path) -> int:
     """Relay stdin and stdout to the daemon's socket at `path` as Mac `name`; the exit status.
 
-    Returns 0 once either side hangs up, and 1 with a message on stderr when `name` is invalid
-    or nothing listens on `path`. The messages reach the Mac through ssh, which logs them.
+    Returns 0 once either side hangs up, and 1 with a one-line message on stderr when `name` is
+    invalid or `path` cannot be connected to. ssh carries the messages to the Mac's log.
     """
     if not valid_mac_name(name):
         print(f"deck attach: invalid name {name!r}", file=sys.stderr)
@@ -45,6 +45,9 @@ async def attach(name: str, path: Path) -> int:
         socket_reader, socket_writer = await asyncio.open_unix_connection(path)
     except (FileNotFoundError, ConnectionRefusedError):
         print(f"deck is not running (nothing is listening on {path})", file=sys.stderr)
+        return 1
+    except OSError as exc:  # such as a runtime dir that is not a directory: no traceback
+        print(f"deck attach: {path}: {exc}", file=sys.stderr)
         return 1
     loop = asyncio.get_running_loop()
     stdin = asyncio.StreamReader()
