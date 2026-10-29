@@ -30,10 +30,13 @@ from deck.state import StateStore
 log = logging.getLogger(__name__)
 
 REQUEST_TIMEOUT = 15  # seconds; a Bluetooth connect is the slow path
-STDOUT_LIMIT = 16 << 20  # state lines can be big
+READ_LIMIT = 16 << 20  # bytes a line from a Mac may have: state lines can be big
 ATTACH_TIMEOUT = 5.0  # seconds for a new connection to name its Mac
 MAX_ATTACH_LINE = 1024  # bytes, newline included
-STALE_AFTER = 5.0  # seconds of silence after which a Mac with a heartbeat counts as gone
+# Seconds of silence after which a Mac with a heartbeat counts as gone, and seconds after the
+# hello by which a connection must have sent its first state. Well above the longest normal gap
+# between a Mac's messages: a poll can wait out two 5 s tool timeouts before the 1 s interval.
+STALE_AFTER = 15.0
 STALE_CHECK = 1.0  # seconds between the hub's checks for silent Macs
 
 AudioSource = AudioConfig | None | Callable[[], AudioConfig | None]
@@ -184,7 +187,10 @@ class MacHub:
     older session under that name. A session that ends leaves `sessions` only if it is still the
     one registered under its name, so an old connection's teardown never touches a newer one.
     A session that has sent `idle_ms` and then nothing for `STALE_AFTER` seconds is closed, as
-    if its Mac had dropped: it slept or lost the network without closing the connection.
+    if its Mac had dropped: it slept or lost the network without closing the connection. So is
+    a connection that has sent no state `STALE_AFTER` seconds after the hello: it is in no
+    `sessions` entry yet, so nothing else would ever end it, and its `deck attach` and sshd
+    would hang on until TCP gives up.
     """
 
     def __init__(
@@ -201,6 +207,7 @@ class MacHub:
         self.sessions: dict[str, MacSession] = {}  # the online session of each name
         self._active: MacSession | None = None  # the session `mac.*` mirrors
         self._handlers: set[asyncio.Task[Any]] = set()  # one per connection
+        self._waiting: dict[MacSession, float] = {}  # sessions with no state yet: hello time
 
     @property
     def online(self) -> bool:
@@ -213,12 +220,20 @@ class MacHub:
         return None if self._active is None else self._active.name
 
     async def run(self) -> None:
-        """Listen until cancelled, then close every session and remove the socket."""
+        """Listen until cancelled, then close every session and remove the socket.
+
+        Raises `OSError` when the socket cannot be bound, and logs it first: the daemon runs
+        this in the background, where nothing else would say why no Mac can connect.
+        """
         self._publish()
-        sock = bind_private_socket(self._path)
+        try:
+            sock = bind_private_socket(self._path)
+        except OSError as exc:
+            log.error("cannot listen for Macs on %s: %s", self._path, exc)
+            raise
         try:
             # A reader's limit holds for all its lines: the protocol follows the attach line.
-            server = await asyncio.start_unix_server(self._handle, sock=sock, limit=STDOUT_LIMIT)
+            server = await asyncio.start_unix_server(self._handle, sock=sock, limit=READ_LIMIT)
         except BaseException:
             sock.close()
             raise
@@ -288,9 +303,11 @@ class MacHub:
         return name
 
     async def _serve(self, session: MacSession) -> None:
+        self._waiting[session] = self._clock()
         try:
             await session.run(_hello(self._audio), self._on_state)
         finally:
+            self._waiting.pop(session, None)
             if self.sessions.get(session.name) is session:
                 del self.sessions[session.name]
             log.info("Mac %r disconnected", session.name)
@@ -299,6 +316,7 @@ class MacHub:
     def _on_state(self, session: MacSession, values: dict[str, Any]) -> None:
         older = self.sessions.get(session.name)
         if older is not session:  # its first state message: it takes over the name
+            self._waiting.pop(session, None)
             self.sessions[session.name] = session
             if older is not None:
                 log.info("Mac %r connected again; closing its older connection", session.name)
@@ -306,10 +324,23 @@ class MacHub:
         self._publish(session, values)
 
     async def _watch(self) -> None:
-        """Close each session with a heartbeat that has been silent for `STALE_AFTER`."""
+        """Close the sessions that have been quiet for `STALE_AFTER`.
+
+        Quiet means: a session with a heartbeat, since its last message; a session that has sent
+        no state yet, since its hello.
+        """
         while True:
             await asyncio.sleep(STALE_CHECK)
             now = self._clock()
+            for session, hello in list(self._waiting.items()):
+                if now - hello > STALE_AFTER:
+                    log.warning(
+                        "Mac %r sent no state within %gs of the hello; closing the connection",
+                        session.name,
+                        STALE_AFTER,
+                    )
+                    del self._waiting[session]  # closed once, not again until `run` returns
+                    session.close()
             stale = [
                 s
                 for s in self.sessions.values()

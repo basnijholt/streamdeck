@@ -423,22 +423,41 @@ async def test_silent_attach_is_closed_after_5s(hub, path, caplog, monkeypatch):
 
 
 async def test_silent_session_is_closed(hub, path, store, clock):
-    assert mac_client.STALE_AFTER == 5.0
+    assert mac_client.STALE_AFTER == 15.0
     clock.now = 900.0
     async with fake_mac(path, "home", Poller({"volume": 20})):  # no idle_ms: no heartbeat
         await eventually(lambda: hub.active == "home")
         clock.now = 1000.0
         async with fake_mac(path, "mini", Poller({"volume": 10, "idle_ms": 0})) as mini:
             await eventually(lambda: hub.active == "mini")
-            clock.now += 4.9
+            clock.now += 14.9
             await asyncio.sleep(0.1)  # ten watchdog checks
             assert hub.active == "mini"
 
-            clock.now += 0.2  # 5.1 s without a word from the mini Mac
+            clock.now += 0.2  # 15.1 s without a word from the mini Mac
             await asyncio.wait_for(mini.task, 2)  # the hub hung up on it
             await eventually(lambda: hub.active == "home")
             assert store.get("mac.volume") == 20
             assert store.get("mac.connected") == ["home"]
+
+
+async def test_attached_connection_without_state_is_closed(hub, path, clock, caplog):
+    with caplog.at_level(logging.WARNING, logger="deck.mac.client"):
+        reader, writer = await asyncio.open_unix_connection(path)
+        try:
+            writer.write(attach_line("mini"))
+            assert json.loads(await asyncio.wait_for(reader.readline(), 2)) == HELLO
+            writer.write(b'{"id": 1, "ok": true}\n')  # a line, but not a state
+            clock.now += 14.9
+            await asyncio.sleep(0.1)  # ten watchdog checks
+            assert not reader.at_eof()
+
+            clock.now += 0.2  # 15.1 s after the hello without a state
+            assert await asyncio.wait_for(reader.read(), 2) == b""  # the hub hung up
+        finally:
+            writer.close()
+    assert "no state" in caplog.text
+    assert not hub.online
 
 
 async def test_mac_without_idle_ms_is_never_closed_for_silence(hub, path, clock):
@@ -468,6 +487,16 @@ async def test_socket_is_private_and_removed_on_exit(path, store, clock):
     await asyncio.gather(task, return_exceptions=True)
     assert task.cancelled()
     assert not path.exists()
+
+
+async def test_run_logs_why_it_cannot_listen(path, store, clock, caplog):
+    path.write_text("not a socket")  # bind_private_socket leaves a regular file alone
+    hub = MacHub(path, None, store, clock=clock)
+    with caplog.at_level(logging.ERROR, logger="deck.mac.client"), pytest.raises(OSError):
+        await hub.run()
+    (record,) = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert str(path) in record.getMessage()
+    assert path.read_text() == "not a socket"
 
 
 async def test_cancelling_run_closes_every_session(path, store, clock):
