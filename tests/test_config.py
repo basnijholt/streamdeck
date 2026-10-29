@@ -9,7 +9,7 @@ from deck.config import Action, Config, ConfigError, load_config
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
-MAC = {"host": "macbook-m5", "key": "~/.config/deck/mac_ed25519"}
+MAC = {}
 HA = {"url": "http://ha.local:8123", "token_env": "HA_TOKEN"}
 
 
@@ -164,6 +164,13 @@ def test_36_keys_and_6_dials_accepted(tmp_path):
 def test_too_many_dials_rejected(tmp_path):
     with pytest.raises(ConfigError):
         load_config(write(tmp_path, home(dials=[{"kind": "volume"}] * 7)))
+
+
+def test_mac_section_has_no_fields(tmp_path):
+    cfg = load_config(write(tmp_path, home({"press": {"mac.lock": None}}, mac={})))
+    assert cfg.mac is not None  # an empty section turns the hub on
+    errs = errors_of(tmp_path, home(mac={"host": "macbook-m5"}))
+    assert errs == ["mac.host: Extra inputs are not permitted"]
 
 
 def test_mac_action_without_mac_section(tmp_path):

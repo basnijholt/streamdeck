@@ -1,8 +1,8 @@
 """Child processes that talk over pipes, started and stopped so that none is ever left behind.
 
-Shared by the PC's `MacClient` (an ssh into the Mac) and the Mac's `deck connect` (an ssh out to
-the PC): `spawn` starts the child with all three streams piped, `forward_stderr` logs what it
-writes there and `stop` ends it, however the caller got cancelled.
+Used by the Mac's `deck connect` (an ssh out to the PC): `spawn` starts the child with all three
+streams piped, `forward_stderr` logs what it writes there and `stop` ends it, however the caller
+got cancelled.
 """
 
 import asyncio
@@ -46,8 +46,8 @@ async def spawn(argv: list[str], limit: int) -> Process:
 async def forward_stderr(stream: asyncio.StreamReader, prefix: str) -> None:
     """Log the child's stderr line by line, so the pipe never fills up and blocks it.
 
-    `deck remote` logs there, and ssh reports its own failures there (a refused connection,
-    a rejected key). Each line is logged as a warning, after `prefix`.
+    `deck attach` reports its errors there, and ssh reports its own failures there (a refused
+    connection, a rejected key). Each line is logged as a warning, after `prefix`.
     """
     pending = b""
     while chunk := await stream.read(1 << 16):

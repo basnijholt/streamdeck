@@ -1016,8 +1016,8 @@ class StubClient:
         return None
 
 
-class StubMacClient(FakeMac):
-    def __init__(self, cfg, audio, store) -> None:
+class StubMacHub(FakeMac):
+    def __init__(self, path, audio, store) -> None:
         super().__init__()
 
     async def run(self) -> None:
@@ -1027,7 +1027,7 @@ class StubMacClient(FakeMac):
 def _cli_config(**sections) -> Config:
     t3 = T3Config(servers=[SERVER, LAPTOP], models={"claudeAgent": CLAUDE}, efforts=EFFORTS)
     return Config.model_validate(
-        {"pages": {"home": {}}, "t3": t3.model_dump(), "mac": {"host": "mac", "key": "k"}}
+        {"pages": {"home": {}}, "t3": t3.model_dump(), "mac": {}}
         | sections
     )
 
@@ -1036,7 +1036,7 @@ def _cli_config(**sections) -> Config:
 def stubs(monkeypatch):
     StubClient.instances = []
     monkeypatch.setattr(cli, "T3Client", StubClient)
-    monkeypatch.setattr(cli, "MacClient", StubMacClient)
+    monkeypatch.setattr(cli, "MacHub", StubMacHub)
     monkeypatch.delenv("T3_TOKEN", raising=False)
     monkeypatch.delenv("T3_LAPTOP_TOKEN", raising=False)
 

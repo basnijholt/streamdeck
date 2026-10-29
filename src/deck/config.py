@@ -174,9 +174,7 @@ class Page(_Model):
 
 
 class MacConfig(_Model):
-    host: str
-    key: Path
-    command: list[str] | None = None
+    """No fields: the section's presence turns on the hub that Macs dial in to."""
 
 
 class HAConfig(_Model):

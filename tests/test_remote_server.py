@@ -2,7 +2,6 @@ import asyncio
 import contextlib
 import json
 import socket
-import sys
 
 import pytest
 
@@ -514,46 +513,3 @@ async def test_long_but_legal_line_is_served():
         await link.send({"id": 1, "kind": "app", "args": args})
         assert await link.recv() == {"id": 1, "ok": True, "result": None}
         assert seen == [len(args)]
-
-
-# --- stdio ------------------------------------------------------------------
-
-STDIO_SERVER = """
-import asyncio
-from deck.remote.server import serve_stdio
-
-class Executor:
-    def configure(self, hello):
-        self.hello = hello
-    async def run(self, kind, args):
-        return [kind, args, self.hello]
-
-class Poller:
-    async def snapshot(self):
-        return {"up": True}
-
-asyncio.run(serve_stdio(Executor(), Poller()))
-"""
-
-
-async def test_serve_stdio_speaks_the_protocol_on_stdin_and_stdout():
-    proc = await asyncio.create_subprocess_exec(
-        sys.executable, "-I", "-c", STDIO_SERVER,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )  # fmt: skip
-    try:
-        proc.stdin.write(b'{"hello": {"h": 1}}\n{"id": 1, "kind": "app", "args": "Ghostty"}\n')
-        await proc.stdin.drain()
-        lines = [json.loads(await asyncio.wait_for(proc.stdout.readline(), 10)) for _ in range(2)]
-        assert {"state": {"up": True}} in lines
-        assert {"id": 1, "ok": True, "result": ["app", "Ghostty", {"h": 1}]} in lines
-        proc.stdin.close()  # EOF: the server returns
-        assert await asyncio.wait_for(proc.wait(), 10) == 0
-        assert await proc.stdout.read() == b""
-        assert await proc.stderr.read() == b""
-    finally:
-        if proc.returncode is None:
-            proc.kill()
-            await proc.wait()

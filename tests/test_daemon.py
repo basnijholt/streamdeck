@@ -36,9 +36,7 @@ from deck.t3.model import Thread
 from deck.views import key_view
 
 VALID = """\
-mac:
-  host: macbook
-  key: /tmp/key
+mac: {}
 home_assistant:
   url: http://ha.local:8123
   token_env: HA_TOKEN
@@ -854,15 +852,15 @@ async def test_changed_connection_sections_log_a_restart_warning(daemon, config_
         assert daemon.reload() is True
         assert warnings() == []  # pages are applied live
 
-        config_path.write_text(VALID.replace("host: macbook", "host: other-mac"))
+        config_path.write_text(VALID.replace("ha.local", "ha.example"))
         assert daemon.reload() is True
-        assert warnings() == ["restart deck to apply changes to: mac"]
+        assert warnings() == ["restart deck to apply changes to: home_assistant"]
 
         caplog.clear()
-        both = VALID.replace("host: macbook", "host: other-mac")
-        config_path.write_text(both.replace("ha.local", "ha.example"))
+        both = VALID.replace("ha.local", "ha.example") + "ddc: {model: Dell}\n"
+        config_path.write_text(both)
         assert daemon.reload() is True
-        assert warnings() == ["restart deck to apply changes to: mac, home_assistant"]
+        assert warnings() == ["restart deck to apply changes to: home_assistant, ddc"]
 
         caplog.clear()
         config_path.write_text(VALID)  # back to what the services were built with
@@ -1105,16 +1103,16 @@ def test_run_builds_daemon_with_deck_and_services(monkeypatch, config_path):
         async def run(self) -> None:
             created["ran"] = True
 
-    class StubMacClient:
-        def __init__(self, cfg, audio, store) -> None:
+    class StubMacHub:
+        def __init__(self, path, audio, store) -> None:
             pass
 
-        async def run(self) -> None:  # the real one would start ssh
+        async def run(self) -> None:  # the real one would listen on a socket
             await asyncio.Event().wait()
 
     monkeypatch.setattr(cli, "Daemon", StubDaemon)
     monkeypatch.setattr(cli, "StreamDeckDevice", FakeDeck)
-    monkeypatch.setattr(cli, "MacClient", StubMacClient)
+    monkeypatch.setattr(cli, "MacHub", StubMacHub)
     assert main(["run", str(config_path)]) == 0
     assert created["ran"] is True
     assert created["path"] == config_path
@@ -1126,5 +1124,5 @@ def test_run_builds_daemon_with_deck_and_services(monkeypatch, config_path):
     assert isinstance(services, Services)
     assert (services.store, services.config) == (store, config)
     assert isinstance(services.actions, ActionRunner)
-    assert isinstance(services.mac, StubMacClient)  # the config has a mac section
+    assert isinstance(services.mac, StubMacHub)  # the config has a mac section
     assert (services.ddc, services.ha, services.t3) == (None, None, None)

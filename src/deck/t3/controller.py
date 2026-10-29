@@ -26,7 +26,7 @@ from urllib.parse import urlsplit
 
 from deck.config import DialSpec, T3Config, T3Server
 from deck.dials import DIAL_FACTORIES, Services
-from deck.mac.client import MacClient, MacError, MacOffline
+from deck.mac.client import MacError, MacHub, MacOffline
 from deck.state import StateStore
 from deck.t3.model import Pending, Thread, thread_state, visible_threads
 from deck.t3.source import ModelSelection, T3Error, T3Source
@@ -53,7 +53,7 @@ class T3Controller:
         store: StateStore,
         sources: dict[str, T3Source],
         cfg: T3Config,
-        mac: MacClient | None,
+        mac: MacHub | None,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
@@ -151,7 +151,7 @@ class T3Controller:
         await self._open(server, server.web_url)
 
     async def _open(self, server: T3Server, url: str) -> None:
-        """Navigate the Brave tab of `server` to `url`; raises what `MacClient.request` raises."""
+        """Navigate the Brave tab of `server` to `url`; raises what `MacHub.request` raises."""
         if self.mac is None:
             log.warning("no Mac configured: cannot open %s", url)
             return
@@ -164,7 +164,7 @@ class T3Controller:
         """The thread open in the active tab of Brave's front window, read from the Mac now.
 
         None when that tab is not a thread of a configured server, or of one the deck does not
-        know. Raises `MacOffline` and `MacError` as `MacClient.request` does.
+        know. Raises `MacOffline` and `MacError` as `MacHub.request` does.
         """
         if self.mac is None:
             raise MacOffline(NO_MAC)

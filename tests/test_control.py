@@ -21,9 +21,7 @@ from deck.events import Connected, KeyDown, KeyUp
 from deck.state import StateStore
 
 CONFIG = """\
-mac:
-  host: macbook
-  key: /tmp/key
+mac: {}
 pages:
   home:
     keys:

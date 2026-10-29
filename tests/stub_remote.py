@@ -1,9 +1,12 @@
-"""A stand-in for `deck remote` that the Mac client tests drive over the real protocol.
+"""A stand-in for a Mac running `deck connect`, to try the PC side without a Mac.
+
+Cross-wire it with `deck attach NAME` on the PC (each one's stdout into the other's stdin, for
+example with a bash `coproc`) and the daemon sees a Mac that speaks the real protocol.
 
 Run it by path: `python stub_remote.py [STATE_FILE] [--stubborn]`. After the PC's `hello` it
 sends the snapshot read from STATE_FILE (a JSON object; read at every start, so a test can
 change what the next connection sees). It then answers requests, and what a request does is
-decided by its kind, so a test scripts the stub through the client itself:
+decided by its kind, so whoever drives the PC side scripts the stub with requests of its own:
 
     log      reply with every message received so far (the hello and all requests but `log`)
     pid      reply with this process's id

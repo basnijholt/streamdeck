@@ -180,6 +180,8 @@ never exposes Mac execution or arbitrary actions — only these commands.
 
 ## 5. Mac remote
 
+Superseded by 2026-10-28-mac-dial-out-design.md.
+
 - **Transport:** the daemon keeps one `ssh -T -i ~/.config/deck/mac_ed25519
   macbook-m5 deck remote` process open and speaks JSON Lines over its
   stdin/stdout. No per-press handshake. On EOF it reconnects with

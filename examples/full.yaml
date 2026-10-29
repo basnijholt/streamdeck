@@ -1,8 +1,6 @@
 # The full v1 layout: every key and dial. `assets/deck.png` is rendered from this file:
 #   deck render examples/full.yaml --state examples/state.json --png assets/deck.png
-mac:
-  host: macbook-m5
-  key: ~/.config/deck/mac_ed25519
+mac: {}
 home_assistant:
   url: http://192.168.1.178:8123
   token_env: HA_TOKEN

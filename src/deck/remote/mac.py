@@ -1,4 +1,4 @@
-"""The Mac side of `deck remote`: runs the allowlisted kinds and polls the state to push.
+"""The Mac side of the deck: runs the allowlisted kinds and polls the state to push.
 
 Every command goes through a `Runner` as an argv list: no shell, and AppleScript gets its
 arguments through `on run argv`, never spliced into script text. `MacExecutor` checks the
@@ -6,8 +6,7 @@ typed arguments of each kind itself (the server only re-checks URLs); `MacPoller
 audio, volume, Bluetooth and idle state, and tolerates any single query failing.
 
 macOS tools used: `open`, `osascript`, `screencapture`, `pmset`, `ioreg`, `SwitchAudioSource`
-(brew switchaudio-osx >= 1.2, for `-f json`) and `blueutil`. stdout belongs to the protocol,
-so nothing here prints.
+(brew switchaudio-osx >= 1.2, for `-f json`) and `blueutil`. Nothing here prints.
 """
 
 import asyncio

@@ -22,9 +22,10 @@ from deck.dials import Services
 from deck.ha import HomeAssistant, entities_in
 from deck.local import register_local_actions
 from deck.mac import dials as _mac_dials  # noqa: F401  (registers the volume and input dials)
-from deck.mac.client import MacClient, handle_mac_action
+from deck.mac.attach import attach, default_mac_socket
+from deck.mac.client import MacHub, handle_mac_action
+from deck.remote.connect import connect_forever, ssh_argv
 from deck.remote.mac import MacExecutor, MacPoller
-from deck.remote.server import serve_stdio
 from deck.render import compose_deck, draw_key, draw_segment
 from deck.runner import Runner
 from deck.state import StateStore
@@ -216,7 +217,7 @@ async def _services(config: Config, store: StateStore, stack: AsyncExitStack) ->
         services.ddc = Ddc(runner, config.ddc.model, store)
         _start_background(stack, services.ddc.poll_forever())
     if config.mac is not None:
-        mac = services.mac = MacClient(config.mac, lambda: services.config.audio, store)
+        mac = services.mac = MacHub(default_mac_socket(), lambda: services.config.audio, store)
         _start_background(stack, mac.run())
 
         async def mac_action(action: Action) -> None:
@@ -253,7 +254,7 @@ TOOL_DIRS = ("/opt/homebrew/bin", "/usr/local/bin", "~/.local/bin")
 def _extend_path() -> None:
     """Put `TOOL_DIRS` that exist and are missing from PATH in front of it.
 
-    An SSH forced command starts with a bare PATH, without Homebrew.
+    launchd starts `deck connect` with a bare PATH, without Homebrew.
     """
     entries = [entry for entry in os.environ.get("PATH", "").split(os.pathsep) if entry]
     present = {os.path.normpath(entry) for entry in entries}
@@ -265,19 +266,19 @@ def _extend_path() -> None:
         os.environ["PATH"] = os.pathsep.join([*added, *entries])
 
 
-def _remote(args: argparse.Namespace) -> int:
-    """Serve the PC's JSON Lines protocol on stdin/stdout (run by its SSH forced command)."""
+def _connect(args: argparse.Namespace) -> int:
+    """Dial out to the PC and serve its requests, reconnecting until stopped."""
     logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        stream=sys.stderr,  # stdout carries the protocol and nothing else
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
     _extend_path()
     executor = MacExecutor(Runner())
 
     async def serve() -> None:
         try:
-            await serve_stdio(executor, MacPoller(Runner(), executor))
+            await connect_forever(
+                ssh_argv(args.destination, args.key), executor, MacPoller(Runner(), executor)
+            )
         finally:
             await executor.aclose()
 
@@ -286,6 +287,10 @@ def _remote(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         pass
     return 0
+
+
+def _attach(args: argparse.Namespace) -> int:
+    return asyncio.run(attach(args.name, default_mac_socket()))
 
 
 def _control(message: dict[str, Any], pretty: bool = False) -> int:
@@ -337,8 +342,16 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("config", type=Path)
     run.set_defaults(func=_run)
 
-    remote = sub.add_parser("remote", help="serve Mac actions and state over stdin/stdout")
-    remote.set_defaults(func=_remote)
+    connect = sub.add_parser("connect", help="on a Mac: dial out to the PC and serve its requests")
+    connect.add_argument("destination", help="the PC, as ssh takes it: [user@]host")
+    connect.add_argument("--key", type=Path, help="ssh identity file for the PC")
+    connect.set_defaults(func=_connect)
+
+    attach_cmd = sub.add_parser(
+        "attach", help="on the PC: relay a Mac's connection to the daemon (run by sshd)"
+    )
+    attach_cmd.add_argument("name", help="the Mac's name")
+    attach_cmd.set_defaults(func=_attach)
 
     reload = sub.add_parser("reload", help="make the running daemon reload its config")
     reload.set_defaults(func=_reload)

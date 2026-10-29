@@ -21,8 +21,10 @@ flip Home Assistant lights and dim the monitor — all from one YAML file.
 
 The deck is plugged into an always-on NixOS PC, but 99.9 % of the work happens on a Mac that
 shares the same monitor. So the daemon runs next to the USB device and treats the Mac as a
-**remote**: a single long-lived SSH connection, locked down to an allowlist of actions, carries
-key presses to the Mac and audio state back.
+**remote**: the Mac dials out to the PC over SSH, and that one long-lived connection, locked
+down to an allowlist of actions, carries key presses to the Mac and its state back. Nothing
+ever connects into a Mac, so a locked-down laptop can join too, and with two Macs the deck
+acts on the one you touched last.
 
 It is the successor to
 [home-assistant-streamdeck-yaml](https://github.com/basnijholt/home-assistant-streamdeck-yaml):
@@ -37,7 +39,8 @@ coding agents.
 - 🧠 **Model and effort dials that can't hit the wrong thread** — they act only on the thread
   open in Brave's front tab, re-checked at the moment you press.
 - 🖥️ **Your Mac, from another computer** — open apps, focus-or-open browser tabs, take
-  screenshots, run Keyboard Maestro macros, lock the screen.
+  screenshots, run Keyboard Maestro macros, lock the screen. With several Macs, the keys act on
+  the one with the latest keyboard or mouse input.
 - 🎧 **Audio without the menu bar** — one key per output (Bluetooth connects on demand), mic
   mute with a live/muted indicator, an input guard against AirPods hijacking the mic.
 - 💡 **Home Assistant** — toggle lights and scenes, keys light up with entity state, a dial for
@@ -53,31 +56,38 @@ flowchart LR
     subgraph PC["NixOS PC · always on"]
         deck(["Stream Deck + XL"])
         daemon["deck run"]
+        attach["deck attach<br/>(forced by sshd)"]
         cli["deck CLI"]
         deck <-- USB --> daemon
         cli -- socket --> daemon
+        attach -- socket --> daemon
     end
     subgraph Mac["Mac · where you work"]
-        remote["deck remote"]
+        connect["deck connect"]
         tools[["open · osascript<br/>SwitchAudioSource · blueutil<br/>screencapture · Keyboard Maestro"]]
-        remote --> tools
+        connect --> tools
     end
     subgraph LAN["Services"]
         t3[("T3 Code")]
         ha[("Home Assistant")]
     end
     monitor[/"Dell U4025QW"/]
-    daemon <== "SSH · JSON Lines" ==> remote
+    connect == "dials out · SSH · JSON Lines" ==> attach
     daemon <-- WebSocket --> t3
     daemon <-- "WebSocket · REST" --> ha
     daemon -- "DDC/CI (ddcutil)" --> monitor
 ```
 
 - **One package, two roles.** `deck run` owns the device, renders keys, and keeps a state store
-  that providers (T3, Home Assistant, the Mac, DDC) push into. `deck remote` runs on the Mac and
-  executes a fixed set of typed requests.
+  that providers (T3, Home Assistant, the Macs, DDC) push into. `deck connect` runs on each Mac,
+  dials the PC and executes a fixed set of typed requests. On the PC, sshd runs `deck attach`
+  for that connection, which hands it to the daemon.
 - **Only small messages cross the network.** Rendering stays on the PC; the Mac sees requests such
   as `{"id": 7, "kind": "audio.output", "args": {...}}` and sends state diffs back once a second.
+  The diffs include `idle_ms`, the milliseconds since its last keyboard or mouse input.
+- **The Mac you used last is the active one.** The daemon follows the Mac with the latest input
+  and mirrors its state into `mac.*`; requests go to it. `deck state` shows it as `mac.active`,
+  and `mac.connected` lists every Mac that is online. A Mac going away never affects the other.
 - **Everything degrades on its own.** If the Mac, Home Assistant or T3 goes away, their keys grey
   out and the clients reconnect with backoff while the rest of the deck keeps working.
 
@@ -156,7 +166,7 @@ pages:
 
 | Section | What it configures |
 |---|---|
-| `mac` | `host` and SSH `key` for the Mac remote |
+| `mac` | `{}`: no fields, the section turns on the hub that Macs dial in to |
 | `home_assistant` | `url` and `token_env`, the environment variable holding a long-lived access token |
 | `t3` | `servers` (API `url`, browser `web_url`, `environment_id`, `token_env`), `models` per provider instance, `efforts`, `effort_options` |
 | `ddc` | `model` of the monitor to find among `ddcutil detect` results |
@@ -209,8 +219,9 @@ Each action is a single-key mapping: `{<type>: <arguments>}`.
 | `mac.script` | file name | run an executable from `~/.config/deck/scripts/` on the Mac |
 | `mac.lock` | — | sleep the display (locks if a password is required) |
 
-While the Mac is unreachable, `mac.*` keys render greyed with 🚫 and presses are dropped rather
-than queued.
+`mac.*` actions run on the active Mac: the connected one with the most recent keyboard or mouse
+input. While no Mac is connected, `mac.*` keys render greyed with 🚫 and presses are dropped
+rather than queued.
 
 </details>
 
@@ -245,7 +256,7 @@ users.users.basnijholt.linger = true;       # start the user service at boot
 
 systemd.user.services.deck = {
   wantedBy = [ "default.target" ];
-  path = [ pkgs.ddcutil pkgs.openssh ];
+  path = [ pkgs.ddcutil ];
   environment.LD_LIBRARY_PATH = "${pkgs.hidapi}/lib";
   serviceConfig = {
     ExecStart = "%h/.local/bin/deck run %h/.config/deck/config.yaml";
@@ -255,25 +266,72 @@ systemd.user.services.deck = {
 };
 ```
 
-Then a dedicated SSH key for the Mac: `ssh-keygen -t ed25519 -f ~/.config/deck/mac_ed25519 -N ""`.
+The PC needs nothing else for the Macs: each one adds a line to your `~/.ssh/authorized_keys`
+(see **Mac**). `deck attach` finds the daemon's socket through `$XDG_RUNTIME_DIR`, which NixOS's
+sshd sets for every session (`pam_systemd`).
 
 </details>
 
 <details>
 <summary><b>Mac</b></summary>
 
+Every Mac gets its own key and its own name (`macbook` below).
+
 1. Install the tools: `brew install switchaudio-osx blueutil`, and the package with
    `uv tool install`.
-2. Authorize the PC's key in `~/.ssh/authorized_keys`, pinned to `deck remote` and to the PC's
-   address:
+2. Make a key that the Mac uses only for this:
+
+   ```bash
+   mkdir -p ~/.config/deck
+   ssh-keygen -t ed25519 -f ~/.config/deck/pc_ed25519 -N ""
+   ```
+
+3. On the PC, add the Mac's public key (`~/.config/deck/pc_ed25519.pub`) to `~/.ssh/authorized_keys`,
+   pinned to `deck attach` under the Mac's name and to your LAN:
 
    ```
-   command="/Users/you/.local/bin/deck remote",restrict,from="192.168.1.5" ssh-ed25519 AAAA… deck
+   command="/home/basnijholt/.local/bin/deck attach macbook",restrict,from="192.168.1.0/24" ssh-ed25519 AAAA… deck@macbook
    ```
 
-3. Press a Brave tab key and a Keyboard Maestro key once each, and accept the macOS Automation
-   prompts for `sshd-keygen-wrapper`.
-4. Optional: put executable scripts for `mac.script` in `~/.config/deck/scripts/`.
+4. Keep `deck connect` running as a LaunchAgent in your login session, so AppleScript,
+   `screencapture` and Bluetooth run as you. Save this as
+   `~/Library/LaunchAgents/nl.nijho.deck.plist`:
+
+   ```xml
+   <?xml version="1.0" encoding="UTF-8"?>
+   <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+   <plist version="1.0">
+   <dict>
+     <key>Label</key>
+     <string>nl.nijho.deck</string>
+     <key>ProgramArguments</key>
+     <array>
+       <string>/Users/you/.local/bin/deck</string>
+       <string>connect</string>
+       <string>basnijholt@192.168.1.5</string>
+       <string>--key</string>
+       <string>/Users/you/.config/deck/pc_ed25519</string>
+     </array>
+     <key>RunAtLoad</key>
+     <true/>
+     <key>KeepAlive</key>
+     <true/>
+     <key>StandardErrorPath</key>
+     <string>/tmp/deck.log</string>
+   </dict>
+   </plist>
+   ```
+
+   and load it with `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/nl.nijho.deck.plist`.
+   If the PC is down or the daemon is not running, `deck connect` retries with backoff
+   (1 s up to 30 s) and logs to `/tmp/deck.log`.
+5. Press a Brave tab key and a Keyboard Maestro key once each, and accept the macOS Automation
+   prompts. They name the Python that runs `deck`.
+6. Optional: put executable scripts for `mac.script` in `~/.config/deck/scripts/`.
+
+Two `deck connect`s under the same name keep replacing each other, so never share a key between
+Macs. Coming from the old PC-to-Mac setup, delete the PC's `mac_ed25519` key and the Mac's
+`deck remote` line in `authorized_keys`.
 
 </details>
 
@@ -298,25 +356,31 @@ Put both in the `EnvironmentFile` under the names your config's `token_env` fiel
 | `deck reload` | make the running daemon reload its config now |
 | `deck state` | dump the running daemon's state as JSON |
 | `deck press PAGE KEY [--long]` | press a key of the running daemon |
-| `deck remote` | serve Mac actions over stdin/stdout (run by SSH, not by hand) |
+| `deck connect DESTINATION [--key PATH]` | on a Mac: dial out to the PC with `ssh` and serve its requests, reconnecting forever (run by launchd) |
+| `deck attach NAME` | on the PC: relay a Mac's SSH connection to the daemon as `NAME` (run by sshd, not by hand) |
 
 `deck reload`, `deck state` and `deck press` talk to the daemon over a `0600` Unix socket at
 `$XDG_RUNTIME_DIR/deck.sock`, so scripts and agents on the PC can drive the deck too.
 
 ## Security
 
-🔒 The SSH key on the PC can make the Mac do things, so the Mac limits what it can do:
+🔒 Every Mac dials out, so nothing can SSH into a Mac, and the PC holds no key that can make a Mac
+do anything.
 
-- The `authorized_keys` entry forces `deck remote` and adds `restrict`: no shell, PTY, or port
-  forwarding, and `from=` pins it to the PC.
-- `deck remote` accepts only the typed action kinds above. `mac.url` takes only http(s) URLs,
+- Each Mac has its own key. Its `authorized_keys` entry on the PC forces `deck attach <name>` and
+  adds `restrict` (no shell, PTY, or port forwarding), and `from=` pins it to the LAN. The key
+  can attach only under its own name.
+- `deck attach` relays to a `0600` Unix socket of the daemon, so only processes of your user on the
+  PC can attach: the same trust as the control socket.
+- A Mac executes only the typed action kinds above. `mac.url` takes only http(s) URLs,
   `mac.script` runs only files already in the scripts directory, and there is no generic shell.
 - AppleScript arguments go through `on run argv` and are never spliced into script text.
 - The control socket exposes no Mac execution, and tokens live in the environment, not in the
   config.
 
-Accepted risk: anything running as your user on the PC can read the key and use it within that
-allowlist.
+Accepted risk: whoever holds a Mac's key can pose as that Mac. They can claim constant input to
+become the active Mac, see which apps, URLs and tabs the deck sends, and feed it false state. They
+cannot run anything on the PC or on the other Mac. That is fine on a home LAN.
 
 ## Development
 
@@ -325,9 +389,10 @@ uv sync
 uv run pytest                 # runs without a deck, a Mac, T3 or Home Assistant
 ```
 
-The tests use a fake device, a fake command runner and a stub remote, and recorded (sanitized)
-T3 Code protocol fixtures. Protocol notes are in [`docs/t3-protocol.md`](docs/t3-protocol.md), and
-the design and plan in [`docs/baspowers/`](docs/baspowers/).
+The tests use a fake device, a fake command runner, fake Macs that dial in over a real socket, and
+recorded (sanitized) T3 Code protocol fixtures. Protocol notes are in
+[`docs/t3-protocol.md`](docs/t3-protocol.md), and the design and plan in
+[`docs/baspowers/`](docs/baspowers/).
 
 ## Roadmap
 

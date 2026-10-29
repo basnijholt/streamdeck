@@ -1,4 +1,4 @@
-"""`deck remote` protocol server: JSON Lines between the PC-side daemon and the Mac.
+"""The Mac protocol: JSON Lines between the PC's `MacHub` and a Mac running `deck connect`.
 
 One JSON object per line in both directions. The PC sends a `hello` first, then requests
 `{"id", "kind", "args"}`; the Mac answers each request with `{"id", "ok", "result"|"error"}`
@@ -7,14 +7,12 @@ and pushes `{"state": {...}}`: the full snapshot once, then only the keys that c
 Only the kinds in `ALLOWED_KINDS` are ever handed to the executor. There is no generic shell
 kind, and `url`/`tab` URLs are checked again here, whatever the PC's config said.
 
-stdout is the protocol channel: nothing in here may print to it. Diagnostics go through
-`logging`, which reaches stderr.
+Nothing in here prints: diagnostics go through `logging`.
 """
 
 import asyncio
 import json
 import logging
-import sys
 from collections.abc import AsyncIterator
 from typing import Any, Protocol
 from urllib.parse import urlsplit
@@ -76,21 +74,6 @@ async def serve(
     On EOF everything still running is cancelled.
     """
     await _Session(writer, executor, poller, interval).run(reader)
-
-
-async def serve_stdio(executor: Executor, poller: Poller) -> None:
-    """`serve` over this process's stdin and stdout."""
-    loop = asyncio.get_running_loop()
-    reader = asyncio.StreamReader()
-    await loop.connect_read_pipe(lambda: asyncio.StreamReaderProtocol(reader), sys.stdin)
-    transport, protocol = await loop.connect_write_pipe(
-        asyncio.streams.FlowControlMixin, sys.stdout
-    )
-    writer = asyncio.StreamWriter(transport, protocol, reader, loop)
-    try:
-        await serve(reader, writer, executor, poller)
-    finally:
-        writer.close()  # every write was already drained
 
 
 class _Session:

@@ -2,14 +2,13 @@ import asyncio
 import json
 import logging
 import os
-import subprocess
-import sys
-import threading
+from pathlib import Path
 
 import pytest
 from fake_runner import FakeRunner
 
 from deck import cli
+from deck.remote.connect import ssh_argv
 from deck.remote.mac import (
     ACTIVE_URL_SCRIPT,
     BRAVE_TAB_SCRIPT,
@@ -1034,21 +1033,42 @@ async def test_pin_input_ignores_a_failed_device_listing(poller, runner, executo
     assert (await poller.snapshot())["audio.input"] == "Q9 USB"  # compared with the last good list
 
 
-# --- deck remote ------------------------------------------------------------
+# --- deck connect -----------------------------------------------------------
 
 
-def test_main_remote_serves_stdio_with_the_mac_executor_and_poller(monkeypatch, capsys):
+def test_main_connect_runs_connect_forever_over_ssh_with_the_mac_executor_and_poller(
+    monkeypatch, capsys
+):
     seen = {}
 
-    async def fake_serve_stdio(executor, poller):
-        seen["executor"], seen["poller"] = executor, poller
+    async def fake_connect_forever(argv, executor, poller):
+        seen.update(argv=argv, executor=executor, poller=poller)
 
-    monkeypatch.setattr(cli, "serve_stdio", fake_serve_stdio)
-    assert cli.main(["remote"]) == 0
+    monkeypatch.setattr(cli, "connect_forever", fake_connect_forever)
+    assert cli.main(["connect", "me@pc", "--key", "/keys/pc_ed25519"]) == 0
+    assert seen["argv"] == ssh_argv("me@pc", Path("/keys/pc_ed25519"))
     assert isinstance(seen["executor"], MacExecutor)
     assert isinstance(seen["poller"], MacPoller)
     assert seen["poller"]._executor is seen["executor"]
     assert capsys.readouterr().out == ""
+
+
+def test_main_connect_without_a_key_leaves_it_to_ssh(monkeypatch):
+    seen = {}
+
+    async def fake_connect_forever(argv, executor, poller):
+        seen["argv"] = argv
+
+    monkeypatch.setattr(cli, "connect_forever", fake_connect_forever)
+    assert cli.main(["connect", "me@pc"]) == 0
+    assert seen["argv"] == ssh_argv("me@pc", None)
+
+
+def test_main_connect_needs_a_destination(capsys):
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["connect"])
+    assert exit_info.value.code == 2
+    assert "destination" in capsys.readouterr().err
 
 
 def test_extend_path_prepends_missing_tool_directories_that_exist(monkeypatch, tmp_path):
@@ -1094,51 +1114,20 @@ def test_extend_path_leaves_path_alone_when_nothing_is_missing(monkeypatch, tmp_
     assert os.environ["PATH"] == f"/usr/bin{os.pathsep}{tmp_path}"
 
 
-def test_main_remote_extends_path_before_building_the_executor(monkeypatch, tmp_path, capsys):
+def test_main_connect_extends_path_before_building_the_executor(monkeypatch, tmp_path, capsys):
     seen = {}
 
     def spy(runner):
         seen["path"] = os.environ["PATH"]
         return MacExecutor(runner)
 
-    async def fake_serve_stdio(executor, poller):
+    async def fake_connect_forever(argv, executor, poller):
         pass
 
     monkeypatch.setattr(cli, "TOOL_DIRS", (str(tmp_path),))
     monkeypatch.setenv("PATH", "/usr/bin")
     monkeypatch.setattr(cli, "MacExecutor", spy)
-    monkeypatch.setattr(cli, "serve_stdio", fake_serve_stdio)
-    assert cli.main(["remote"]) == 0
+    monkeypatch.setattr(cli, "connect_forever", fake_connect_forever)
+    assert cli.main(["connect", "me@pc"]) == 0
     assert seen["path"] == f"{tmp_path}{os.pathsep}/usr/bin"
     assert capsys.readouterr().out == ""
-
-
-def test_deck_remote_writes_only_protocol_to_stdout(tmp_path):
-    """Run the real thing with a PATH that has no tools (`deck remote` adds Homebrew's, which on
-    a Mac may exist, so the state is not asserted empty): stdout holds only protocol lines."""
-    code = "import sys; from deck.cli import main; sys.exit(main(['remote']))"
-    env = {**os.environ, "PATH": str(tmp_path)}
-    proc = subprocess.Popen(
-        [sys.executable, "-c", code],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=env,
-    )
-    watchdog = threading.Timer(30, proc.kill)
-    watchdog.start()
-    try:
-        proc.stdin.write(b'{"hello": {"audio": {"inputs": [], "pin_input": false}}}\n')
-        proc.stdin.flush()
-        first = json.loads(proc.stdout.readline())
-        assert list(first) == ["state"] and isinstance(first["state"], dict)
-        proc.stdin.close()
-        rest, stderr = proc.stdout.read(), proc.stderr.read()
-        assert proc.wait(timeout=20) == 0
-    finally:
-        watchdog.cancel()
-        proc.kill()
-        for stream in (proc.stdout, proc.stderr):
-            stream.close()
-    assert rest == b""
-    assert b"Traceback" not in stderr

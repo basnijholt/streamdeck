@@ -1,4 +1,4 @@
-"""`deck connect`: the Mac dials out to the PC and serves the `deck remote` protocol over it.
+"""`deck connect`: the Mac dials out to the PC and serves the PC's requests over it.
 
 The child is an ssh to the PC. The PC's `authorized_keys` forces a command on that key (`deck
 attach <name>`), so the child's stdout carries the PC's lines and its stdin takes the Mac's

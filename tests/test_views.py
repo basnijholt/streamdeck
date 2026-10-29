@@ -346,7 +346,7 @@ def dial(**fields):
     return (
         Config.model_validate(
             {
-                "mac": {"host": "m", "key": "k"},
+                "mac": {},
                 "home_assistant": {"url": "http://ha", "token_env": "T"},
                 "t3": {"servers": [], "models": {}},
                 "ddc": {"model": "x"},
