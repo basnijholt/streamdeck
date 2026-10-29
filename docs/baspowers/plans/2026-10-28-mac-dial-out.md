@@ -15,11 +15,11 @@
 ## Global Constraints
 
 - Dependencies stay exactly `streamdeck>=0.10.0`, `pillow>=10.1`, `pydantic>=2`, `pyyaml`, `websockets>=15`.
-- ssh argv: `ssh -T -o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=3 -o ServerAliveCountMax=2 [-i PATH] DESTINATION`, no remote command.
+- ssh argv: `ssh -T -o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=3 -o ServerAliveCountMax=2 -o ControlPath=none [-o IdentitiesOnly=yes -i PATH] DESTINATION`, no remote command. (Ruling: final review added ControlPath/IdentitiesOnly.)
 - Reconnect backoff 1 s doubling to 30 s, reset after a session in which the `hello` arrived.
 - Hub socket `$XDG_RUNTIME_DIR/deck-mac.sock` (else `/tmp/deck-mac-<uid>.sock`), mode 0600, stale socket file replaced.
 - Attach line `{"attach": "<name>"}`, name `^[A-Za-z0-9_-]{1,32}$`, read within 5 s, at most 1 KiB.
-- Request timeout 15 s. A session that has sent `idle_ms` at least once and then nothing for 5 s is closed.
+- Request timeout 15 s. A session that has sent `idle_ms` at least once and then nothing for 15 s is closed (Ruling: was 5 s). A connection with no first state 15 s after the hello is closed.
 - `idle_ms` = integer milliseconds from `ioreg -c IOHIDSystem -d 4 -r -k HIDIdleTime` (nanoseconds). (Ruling: was `idle` in seconds.)
 - Store: `mac.*` mirrors the active Mac with today's keys, plus `mac.active` (name) and `mac.connected` (sorted names); no Mac online means `mac.online` false.
 - The JSON Lines protocol, `ALLOWED_KINDS`, views, dials and actions do not change.

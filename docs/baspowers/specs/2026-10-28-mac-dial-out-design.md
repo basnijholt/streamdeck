@@ -65,8 +65,10 @@ state diffs, requests and replies.
 ### 4.1 Mac: `deck connect DESTINATION [--key PATH]`
 
 - Loops: spawn
-  `ssh -T -o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=3 -o ServerAliveCountMax=2 [-i PATH] DESTINATION`
-  (no remote command: the PC's forced command decides), then run
+  `ssh -T -o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=3 -o ServerAliveCountMax=2 -o ControlPath=none [-o IdentitiesOnly=yes -i PATH] DESTINATION`
+  (no remote command: the PC's forced command decides; `IdentitiesOnly` so an
+  agent key already authorized for a shell never wins over the deck's key,
+  `ControlPath=none` so it never shares the user's multiplexed connection), then run
   `serve(proc.stdout, proc.stdin, MacExecutor, MacPoller)` until ssh exits.
   Reconnect with backoff 1 s → 30 s, reset after a session in which the
   `hello` arrived. ssh's stderr goes to the log.
@@ -158,7 +160,8 @@ command="/home/basnijholt/.local/bin/deck attach mini",restrict,from="192.168.1.
 | Bad or missing attach line | connection closed, warning logged |
 | Same name connects twice | the newer session wins, the older is closed |
 | `ioreg` fails | `idle_ms` left out; the Mac keeps its last `last_input` |
-| Mac sleeps or the network drops without closing the connection | a session that has sent `idle_ms` at least once and then nothing for 5 s is closed, as if the Mac dropped (a Mac without `idle_ms` has no heartbeat and is never closed for silence) |
+| Mac sleeps or the network drops without closing the connection | a session that has sent `idle_ms` at least once and then nothing for 15 s is closed, as if the Mac dropped (a Mac without `idle_ms` has no heartbeat and is never closed for silence). 15 s exceeds the longest normal gap between a Mac's messages: two 5 s tool timeouts in one poll plus the 1 s interval. Switching to another Mac does not wait for this: it follows input |
+| A connection attaches but never sends its first state | closed 15 s after the hello |
 
 ## 7. Testing
 
