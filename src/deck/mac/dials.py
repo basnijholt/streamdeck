@@ -4,7 +4,9 @@ Turning is shown at once (the store is written before the Mac answers) and the r
 through a `Coalescer`, so a fast spin sends the first and the last value, not every tick.
 While requests are in flight or waiting, each turn steps from the dial's own target, not from
 the store: a state push from the Mac then still reports the value before the spin, and would
-make the dial lose ticks. A dial without a connected Mac client does nothing.
+make the dial lose ticks. The target belongs to the Mac that was active when it was set: once
+another Mac is active, turns step from the store, which holds that Mac's state. A dial without
+a connected Mac client does nothing.
 """
 
 import logging
@@ -27,18 +29,22 @@ class VolumeDial:
         self._sender = Coalescer[tuple[int, int]](self._send)
         self._submitted = 0  # number of the newest request handed to the sender
         self._target: int | None = None  # its level, until the sender has dealt with it
+        self._target_mac: str | None = None  # the Mac that was active when the target was set
 
     async def on_turn(self, ticks: int) -> None:
         store = self._services.store
         mac = self._services.mac
-        current = self._target if self._target is not None else store.get("mac.volume")
-        if mac is None or not mac.online or current is None:  # nothing to step from
+        if mac is None or not mac.online:
+            return
+        pending = self._target if self._target_mac == mac.active else None
+        current = pending if pending is not None else store.get("mac.volume")
+        if current is None:  # nothing to step from
             return
         level = max(0, min(100, current + VOLUME_STEP * ticks))
         store.set("mac.volume", level)  # also puts back a level a stale push has overwritten
         if level != current:
             self._submitted += 1
-            self._target = level
+            self._target, self._target_mac = level, mac.active
             self._sender.submit((self._submitted, level))
 
     async def on_press(self) -> None:
@@ -65,6 +71,7 @@ class InputDial:
         self._sender = Coalescer[tuple[int, str]](self._send)
         self._submitted = 0  # number of the newest request handed to the sender
         self._target: str | None = None  # its device, until the sender has dealt with it
+        self._target_mac: str | None = None  # the Mac that was active when the target was set
 
     async def on_turn(self, ticks: int) -> None:
         store = self._services.store
@@ -75,7 +82,8 @@ class InputDial:
         choices = _preferred_inputs(store.get("mac.audio.inputs", []), audio.inputs)
         if not choices:
             return
-        current = self._target if self._target is not None else store.get("mac.audio.input")
+        pending = self._target if self._target_mac == mac.active else None
+        current = pending if pending is not None else store.get("mac.audio.input")
         if current in choices:
             target = choices[(choices.index(current) + ticks) % len(choices)]
         else:  # such as AirPods: enter the list from the end the turn points away from
@@ -83,7 +91,7 @@ class InputDial:
         store.set("mac.audio.input", target)  # also puts back one a stale push has overwritten
         if target != current:
             self._submitted += 1
-            self._target = target
+            self._target, self._target_mac = target, mac.active
             self._sender.submit((self._submitted, target))
 
     async def on_press(self) -> None:

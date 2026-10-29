@@ -125,6 +125,7 @@ class FakeMac:
 
     def __init__(self, online: bool = True) -> None:
         self.online = online
+        self.active = "mini"  # the name of the Mac that `mac.*` mirrors
         self.requests: list[tuple[str, object]] = []
         self.block: asyncio.Event | None = None
         self.error: Exception | None = None
@@ -305,6 +306,21 @@ async def test_volume_turn_after_the_sends_steps_from_the_store_again(store):
     assert store.get("mac.volume") == 12
 
 
+async def test_volume_turn_after_the_active_mac_changed_steps_from_the_store(store):
+    mac = FakeMac()
+    mac.block = asyncio.Event()
+    store.set("mac.volume", 40)
+    dial = volume_dial(make_services(store, mac))
+    await dial.on_turn(1)  # 42 for the mini Mac, now in flight
+    mac.active = "home"
+    store.set("mac.volume", 10)  # the home Mac's state replaces the mini Mac's
+    await dial.on_turn(1)
+    assert store.get("mac.volume") == 12  # not 44: the target was the mini Mac's level
+    mac.block.set()
+    await settle()
+    assert mac.requests == [("volume", 42), ("volume", 12)]
+
+
 async def test_volume_send_failure_is_logged_without_a_traceback_and_ends_the_target(store, caplog):
     mac = FakeMac()
     mac.error = MacError("osascript: nope")
@@ -436,6 +452,21 @@ async def test_input_turn_in_flight_steps_from_the_target_not_a_stale_push(store
     store.set("mac.audio.input", "Q9 Mic")  # after the sends the store is the base again
     await dial.on_turn(1)
     assert store.get("mac.audio.input") == "MV7 USB"
+
+
+async def test_input_turn_after_the_active_mac_changed_steps_from_the_store(store):
+    mac = FakeMac()
+    mac.block = asyncio.Event()
+    store.update("mac.audio.", {"inputs": ["Q9 Mic", "MV7 USB", "Quiet MV7"], "input": "Q9 Mic"})
+    dial = input_dial(make_services(store, mac))
+    await dial.on_turn(1)  # MV7 USB for the mini Mac, now in flight
+    mac.active = "home"
+    store.set("mac.audio.input", "Q9 Mic")  # the home Mac's state replaces the mini Mac's
+    await dial.on_turn(1)
+    assert store.get("mac.audio.input") == "MV7 USB"  # not Quiet MV7: one step from Q9 Mic
+    mac.block.set()
+    await settle()
+    assert mac.requests == [("audio.input", "MV7 USB"), ("audio.input", "MV7 USB")]
 
 
 async def test_input_send_failure_is_logged_without_a_traceback(store, caplog):
