@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/icon.svg" width="72" height="72" alt="">
+<img src="assets/logo.svg" width="200" alt="">
 
 # streamdeck
 

@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 176" role="img" aria-label="streamdeck logo: a Stream Deck + XL with agent status keys and a turning dial">
+  <style>
+    .key { fill: #1c1c21; stroke: #2a2a31; stroke-width: 1.5; }
+    .working { fill: #0f2a1a; stroke: #22c55e; animation: breathe 2.4s ease-in-out infinite alternate; }
+    .working.late { animation-delay: -1.2s; }
+    .needs-you { fill: #3a2a06; stroke: #f59e0b; animation: nudge 3s ease-in-out infinite; }
+    .on { fill: #3a3208; stroke: #facc15; }
+    .track { fill: #2a2a31; }
+    .level { fill: #3b82f6; }
+    .turning-level { transform-box: fill-box; transform-origin: left center; animation: level 7s ease-in-out infinite; }
+    .dial { fill: #18181b; stroke: #3f3f46; stroke-width: 1.5; }
+    .notch { stroke: #a1a1aa; stroke-width: 1.8; stroke-linecap: round; }
+    .turning { transform-box: view-box; transform-origin: 30px 156px; animation: turn 7s ease-in-out infinite; }
+    @keyframes breathe { from { stroke-opacity: 0.35; } to { stroke-opacity: 1; } }
+    @keyframes nudge { 0%, 60%, 100% { opacity: 1; } 75% { opacity: 0.45; } }
+    @keyframes turn { 0%, 100% { transform: rotate(-60deg); } 50% { transform: rotate(60deg); } }
+    @keyframes level { 0%, 100% { transform: scaleX(0.2); } 50% { transform: scaleX(0.9); } }
+    @media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
+  </style>
+  <defs>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#202026"/>
+      <stop offset="1" stop-color="#0c0c0f"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="2" y="2" width="236" height="172" rx="24" fill="url(#body)" stroke="#2a2a31" stroke-width="2"/>
+
+  <!-- Keys: 6 × 3 -->
+  <rect class="key" x="16" y="16" width="28" height="28" rx="7"/>
+  <rect class="key working" x="52" y="16" width="28" height="28" rx="7"/>
+  <rect class="key" x="88" y="16" width="28" height="28" rx="7"/>
+  <rect class="key" x="124" y="16" width="28" height="28" rx="7"/>
+  <rect class="key" x="160" y="16" width="28" height="28" rx="7"/>
+  <rect class="key" x="196" y="16" width="28" height="28" rx="7"/>
+
+  <rect class="key" x="16" y="52" width="28" height="28" rx="7"/>
+  <rect class="key" x="52" y="52" width="28" height="28" rx="7"/>
+  <rect class="key working late" x="88" y="52" width="28" height="28" rx="7"/>
+  <rect class="key needs-you" x="124" y="52" width="28" height="28" rx="7"/>
+  <rect class="key" x="160" y="52" width="28" height="28" rx="7"/>
+  <rect class="key" x="196" y="52" width="28" height="28" rx="7"/>
+
+  <rect class="key on" x="16" y="88" width="28" height="28" rx="7"/>
+  <rect class="key" x="52" y="88" width="28" height="28" rx="7"/>
+  <rect class="key" x="88" y="88" width="28" height="28" rx="7"/>
+  <rect class="key" x="124" y="88" width="28" height="28" rx="7"/>
+  <rect class="key" x="160" y="88" width="28" height="28" rx="7"/>
+  <rect class="key" x="196" y="88" width="28" height="28" rx="7"/>
+
+  <!-- Touch strip with one level per dial -->
+  <rect x="16" y="126" width="208" height="14" rx="5" fill="#1c1c21" stroke="#2a2a31" stroke-width="1.5"/>
+  <rect class="track" x="18" y="131.5" width="24" height="3" rx="1.5"/>
+  <rect class="level turning-level" x="18" y="131.5" width="24" height="3" rx="1.5"/>
+  <rect class="track" x="54" y="131.5" width="24" height="3" rx="1.5"/>
+  <rect class="level" x="54" y="131.5" width="9" height="3" rx="1.5"/>
+  <rect class="track" x="90" y="131.5" width="24" height="3" rx="1.5"/>
+  <rect class="level" x="90" y="131.5" width="19" height="3" rx="1.5"/>
+  <rect class="track" x="126" y="131.5" width="24" height="3" rx="1.5"/>
+  <rect class="level" x="126" y="131.5" width="14" height="3" rx="1.5"/>
+  <rect class="track" x="162" y="131.5" width="24" height="3" rx="1.5"/>
+  <rect class="level" x="162" y="131.5" width="24" height="3" rx="1.5"/>
+  <rect class="track" x="198" y="131.5" width="24" height="3" rx="1.5"/>
+  <rect class="level" x="198" y="131.5" width="6" height="3" rx="1.5"/>
+
+  <!-- Dials -->
+  <circle class="dial" cx="30" cy="156" r="8"/>
+  <line class="notch turning" x1="30" y1="156" x2="30" y2="150.5"/>
+  <circle class="dial" cx="66" cy="156" r="8"/>
+  <line class="notch" x1="66" y1="156" x2="61.5" y2="152.5"/>
+  <circle class="dial" cx="102" cy="156" r="8"/>
+  <line class="notch" x1="102" y1="156" x2="106.5" y2="152.5"/>
+  <circle class="dial" cx="138" cy="156" r="8"/>
+  <line class="notch" x1="138" y1="156" x2="138" y2="150.5"/>
+  <circle class="dial" cx="174" cy="156" r="8"/>
+  <line class="notch" x1="174" y1="156" x2="179" y2="154"/>
+  <circle class="dial" cx="210" cy="156" r="8"/>
+  <line class="notch" x1="210" y1="156" x2="205" y2="154"/>
+</svg>
