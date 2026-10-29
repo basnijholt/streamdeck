@@ -258,6 +258,7 @@ systemd.user.services.deck = {
   wantedBy = [ "default.target" ];
   path = [ pkgs.ddcutil ];
   environment.LD_LIBRARY_PATH = "${pkgs.hidapi}/lib";
+  environment.SSL_CERT_FILE = "/etc/ssl/certs/ca-certificates.crt";  # uv's Python looks for /etc/ssl/cert.pem
   serviceConfig = {
     ExecStart = "%h/.local/bin/deck run %h/.config/deck/config.yaml";
     EnvironmentFile = "%h/.config/deck/secrets.env";   # HA_TOKEN=…, T3_TOKEN=…
